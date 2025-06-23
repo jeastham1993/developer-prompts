@@ -6,3 +6,4 @@ This collection is inspired by [citypaul](https://github.com/citypaul/.dotfiles/
 
 - [.NET](/dotnet.md)
 - [Python](/python.md)
+- [Rust](/rust.md)
