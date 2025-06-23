@@ -991,8 +991,8 @@ public class PaymentApiTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        await _postgres.DisposeAsync();
         await _factory.DisposeAsync();
+        await _postgres.DisposeAsync();
         _client.Dispose();
     }
 
@@ -2007,6 +2007,1329 @@ public class UnitOfWork : IUnitOfWork
     {
         _transaction?.Dispose();
         _context.Dispose();
+    }
+}
+```
+## Refactoring - The Critical Third Step
+
+Evaluating refactoring opportunities is not optional - it's the third step in the TDD cycle. After achieving a green state and committing your work, you MUST assess whether the code can be improved. However, only refactor if there's clear value - if the code is already clean and expresses intent well, move on to the next test.
+
+#### What is Refactoring?
+
+Refactoring means changing the internal structure of code without changing its external behavior. The public API remains unchanged, all tests continue to pass, but the code becomes cleaner, more maintainable, or more efficient. Remember: only refactor when it genuinely improves the code - not all code needs refactoring.
+
+#### When to Refactor
+
+- **Always assess after green**: Once tests pass, before moving to the next test, evaluate if refactoring would add value
+- **When you see duplication**: But understand what duplication really means (see DRY below)
+- **When names could be clearer**: Variable names, method names, or type names that don't clearly express intent
+- **When structure could be simpler**: Complex conditional logic, deeply nested code, or long methods
+- **When patterns emerge**: After implementing several similar features, useful abstractions may become apparent
+
+**Remember**: Not all code needs refactoring. If the code is already clean, expressive, and well-structured, commit and move on. Refactoring should improve the code - don't change things just for the sake of change.
+
+#### Refactoring Guidelines
+
+##### 1. Commit Before Refactoring
+
+Always commit your working code before starting any refactoring. This gives you a safe point to return to:
+
+```bash
+git add .
+git commit -m "feat: add payment validation"
+# Now safe to refactor
+```
+
+##### 2. Look for Useful Abstractions Based on Semantic Meaning
+
+Create abstractions only when code shares the same semantic meaning and purpose. Don't abstract based on structural similarity alone - **duplicate code is far cheaper than the wrong abstraction**.
+
+```csharp
+// Similar structure, DIFFERENT semantic meaning - DO NOT ABSTRACT
+private static bool ValidatePaymentAmount(decimal amount)
+{
+    return amount > 0 && amount <= 10000;
+}
+
+private static bool ValidateTransferAmount(decimal amount)
+{
+    return amount > 0 && amount <= 10000;
+}
+
+// These might have the same structure today, but they represent different
+// business concepts that will likely evolve independently.
+// Payment limits might change based on fraud rules.
+// Transfer limits might change based on account type.
+// Abstracting them couples unrelated business rules.
+
+// Similar structure, SAME semantic meaning - SAFE TO ABSTRACT
+private static string FormatUserDisplayName(string firstName, string lastName)
+{
+    return $"{firstName} {lastName}".Trim();
+}
+
+private static string FormatCustomerDisplayName(string firstName, string lastName)
+{
+    return $"{firstName} {lastName}".Trim();
+}
+
+private static string FormatEmployeeDisplayName(string firstName, string lastName)
+{
+    return $"{firstName} {lastName}".Trim();
+}
+
+// These all represent the same concept: "how we format a person's name for display"
+// They share semantic meaning, not just structure
+private static string FormatPersonDisplayName(string firstName, string lastName)
+{
+    return $"{firstName} {lastName}".Trim();
+}
+
+// Replace all call sites throughout the codebase:
+// Before:
+// var userLabel = FormatUserDisplayName(user.FirstName, user.LastName);
+// var customerName = FormatCustomerDisplayName(customer.FirstName, customer.LastName);
+// var employeeTag = FormatEmployeeDisplayName(employee.FirstName, employee.LastName);
+
+// After:
+// var userLabel = FormatPersonDisplayName(user.FirstName, user.LastName);
+// var customerName = FormatPersonDisplayName(customer.FirstName, customer.LastName);
+// var employeeTag = FormatPersonDisplayName(employee.FirstName, employee.LastName);
+
+// Then remove the original methods as they're no longer needed
+```
+
+**Questions to ask before abstracting:**
+
+- Do these code blocks represent the same concept or different concepts that happen to look similar?
+- If the business rules for one change, should the others change too?
+- Would a developer reading this abstraction understand why these things are grouped together?
+- Am I abstracting based on what the code IS (structure) or what it MEANS (semantics)?
+
+**Remember**: It's much easier to create an abstraction later when the semantic relationship becomes clear than to undo a bad abstraction that couples unrelated concepts.
+
+##### 3. Understanding DRY - It's About Knowledge, Not Code
+
+DRY (Don't Repeat Yourself) is about not duplicating **knowledge** in the system, not about eliminating all code that looks similar.
+
+```csharp
+// This is NOT a DRY violation - different knowledge despite similar code
+private static bool ValidateUserAge(int age)
+{
+    return age >= 18 && age <= 100;
+}
+
+private static bool ValidateProductRating(int rating)
+{
+    return rating >= 1 && rating <= 5;
+}
+
+private static bool ValidateYearsOfExperience(int years)
+{
+    return years >= 0 && years <= 50;
+}
+
+// These represent different business concepts with different ranges and reasons:
+// - User age: based on legal requirements and realistic human lifespan
+// - Product rating: based on UI design (5-star system)
+// - Years of experience: based on realistic career length
+// Don't abstract them just because they look similar!
+
+// This IS a DRY violation - same knowledge expressed multiple times
+public static class PaymentLimits
+{
+    public static bool IsValidAmount(decimal amount) => amount > 0 && amount <= 10000;
+}
+
+public static class RefundLimits
+{
+    public static bool IsValidAmount(decimal amount) => amount > 0 && amount <= 10000;
+}
+
+// Both represent the same business rule: "transaction amount limits"
+// This should be consolidated into a single source of truth:
+public static class TransactionLimits
+{
+    private const decimal MinAmount = 0;
+    private const decimal MaxAmount = 10000;
+    
+    public static bool IsValidAmount(decimal amount) => amount > MinAmount && amount <= MaxAmount;
+}
+```
+
+##### 4. Extracting Methods vs. Extracting Classes
+
+Start by extracting methods within the same class. Only extract to new classes when you have a cohesive set of related methods and data.
+
+```csharp
+// Start here: Long method doing multiple things
+public async Task<PaymentResult> ProcessPaymentAsync(PaymentRequest request)
+{
+    // Validation logic (20 lines)
+    if (string.IsNullOrEmpty(request.CardNumber))
+        return PaymentResult.Invalid("Card number is required");
+    if (request.Amount <= 0)
+        return PaymentResult.Invalid("Amount must be positive");
+    // ... more validation
+
+    // Authorization logic (15 lines)
+    var authRequest = new AuthorizationRequest
+    {
+        CardNumber = request.CardNumber,
+        Amount = request.Amount,
+        Currency = request.Currency
+    };
+    var authResult = await _authorizationService.AuthorizeAsync(authRequest);
+    if (!authResult.IsSuccessful)
+        return PaymentResult.Failed(authResult.ErrorMessage);
+
+    // Capture logic (10 lines)
+    var captureRequest = new CaptureRequest
+    {
+        AuthorizationId = authResult.AuthorizationId,
+        Amount = request.Amount
+    };
+    var captureResult = await _captureService.CaptureAsync(captureRequest);
+    // ... etc
+}
+
+// Step 1: Extract methods (keep in same class)
+public async Task<PaymentResult> ProcessPaymentAsync(PaymentRequest request)
+{
+    var validationResult = ValidatePaymentRequest(request);
+    if (!validationResult.IsValid)
+        return PaymentResult.Invalid(validationResult.ErrorMessage);
+
+    var authorizationResult = await AuthorizePaymentAsync(request);
+    if (!authorizationResult.IsSuccessful)
+        return PaymentResult.Failed(authorizationResult.ErrorMessage);
+
+    var captureResult = await CapturePaymentAsync(authorizationResult.AuthorizationId, request.Amount);
+    return captureResult.IsSuccessful 
+        ? PaymentResult.Success(captureResult.PaymentId)
+        : PaymentResult.Failed(captureResult.ErrorMessage);
+}
+
+private ValidationResult ValidatePaymentRequest(PaymentRequest request)
+{
+    // Validation logic extracted to method
+}
+
+private async Task<AuthorizationResult> AuthorizePaymentAsync(PaymentRequest request)
+{
+    // Authorization logic extracted to method
+}
+
+private async Task<CaptureResult> CapturePaymentAsync(string authorizationId, decimal amount)
+{
+    // Capture logic extracted to method
+}
+
+// Step 2: Only if these methods grow and need shared state, extract to class
+public class PaymentProcessor
+{
+    // Only extract to class when methods are cohesive and share state
+}
+```
+
+##### 5. When NOT to Refactor
+
+```csharp
+// Don't refactor just because code is long if it's already clear
+public static PaymentValidationResult ValidatePayment(PaymentRequest request)
+{
+    var errors = new List<string>();
+    
+    if (string.IsNullOrWhiteSpace(request.CardNumber))
+        errors.Add("Card number is required");
+        
+    if (request.CardNumber?.Length != 16)
+        errors.Add("Card number must be 16 digits");
+        
+    if (string.IsNullOrWhiteSpace(request.ExpiryDate))
+        errors.Add("Expiry date is required");
+        
+    if (!IsValidExpiryDate(request.ExpiryDate))
+        errors.Add("Expiry date must be in MM/YY format and not expired");
+        
+    if (string.IsNullOrWhiteSpace(request.Cvv))
+        errors.Add("CVV is required");
+        
+    if (request.Cvv?.Length is not (3 or 4))
+        errors.Add("CVV must be 3 or 4 digits");
+        
+    if (request.Amount <= 0)
+        errors.Add("Amount must be greater than zero");
+        
+    if (request.Amount > 10000)
+        errors.Add("Amount cannot exceed £10,000");
+    
+    return errors.Count == 0 
+        ? PaymentValidationResult.Valid() 
+        : PaymentValidationResult.Invalid(errors);
+}
+
+// This method is long but perfectly clear - don't refactor it!
+// Each line does exactly one validation check
+// The structure is consistent and easy to follow
+// Breaking it up would make it harder to understand
+```
+
+## Performance and Optimization
+
+### Async/Await Best Practices
+
+```csharp
+// Good - Proper async/await usage
+public async Task<PaymentResult> ProcessPaymentAsync(PaymentRequest request, CancellationToken cancellationToken = default)
+{
+    var payment = await ValidateAndCreatePaymentAsync(request, cancellationToken);
+    
+    var authResult = await _authorizationService.AuthorizeAsync(payment.ToAuthRequest(), cancellationToken);
+    if (!authResult.IsSuccess)
+    {
+        return PaymentResult.Failed(authResult.Error);
+    }
+    
+    var captureResult = await _captureService.CaptureAsync(authResult.AuthorizationId, cancellationToken);
+    return PaymentResult.Success(captureResult.PaymentId);
+}
+
+// Avoid - Blocking on async code
+public PaymentResult ProcessPayment(PaymentRequest request)
+{
+    // NEVER do this - it can cause deadlocks
+    var result = ProcessPaymentAsync(request).Result;
+    return result;
+}
+
+// Good - Parallel execution when operations are independent
+public async Task<CustomerSummary> GetCustomerSummaryAsync(CustomerId customerId, CancellationToken cancellationToken = default)
+{
+    var customerTask = _customerRepository.GetByIdAsync(customerId, cancellationToken);
+    var paymentsTask = _paymentRepository.GetByCustomerIdAsync(customerId, cancellationToken);
+    var ordersTask = _orderRepository.GetByCustomerIdAsync(customerId, cancellationToken);
+
+    await Task.WhenAll(customerTask, paymentsTask, ordersTask);
+
+    var customer = await customerTask;
+    var payments = await paymentsTask;
+    var orders = await ordersTask;
+
+    return new CustomerSummary(customer, payments, orders);
+}
+
+// Good - ConfigureAwait(false) in library code, but not required if building an application.
+public async Task<Payment> CreatePaymentAsync(PaymentRequest request, CancellationToken cancellationToken = default)
+{
+    var payment = Payment.Create(request);
+    
+    await _paymentRepository.AddAsync(payment, cancellationToken).ConfigureAwait(false);
+    await _eventPublisher.PublishAsync(new PaymentCreatedEvent(payment.Id), cancellationToken).ConfigureAwait(false);
+    
+    return payment;
+}
+
+// Good - Proper cancellation token usage
+public async Task<IReadOnlyList<Payment>> GetPaymentsAsync(
+    CustomerId customerId, 
+    CancellationToken cancellationToken = default)
+{
+    cancellationToken.ThrowIfCancellationRequested();
+    
+    return await _context.Payments
+        .Where(p => p.CustomerId == customerId)
+        .ToListAsync(cancellationToken);
+}
+```
+
+### Memory Management and Resource Disposal
+
+```csharp
+// Good - Proper disposal with using statements
+public async Task<Stream> GeneratePaymentReportAsync(ReportRequest request, CancellationToken cancellationToken = default)
+{
+    using var connection = await _connectionFactory.CreateConnectionAsync(cancellationToken);
+    using var command = connection.CreateCommand();
+    
+    command.CommandText = "SELECT * FROM payments WHERE created_at BETWEEN @start AND @end";
+    command.Parameters.Add(new SqlParameter("@start", request.StartDate));
+    command.Parameters.Add(new SqlParameter("@end", request.EndDate));
+    
+    using var reader = await command.ExecuteReaderAsync(cancellationToken);
+    
+    var memoryStream = new MemoryStream();
+    await WriteReportToStreamAsync(reader, memoryStream, cancellationToken);
+    
+    memoryStream.Position = 0;
+    return memoryStream;
+}
+
+// Good - IAsyncDisposable for async cleanup
+public sealed class PaymentProcessor : IAsyncDisposable
+{
+    private readonly HttpClient _httpClient;
+    private readonly IServiceScope _scope;
+    private bool _disposed;
+
+    public PaymentProcessor(HttpClient httpClient, IServiceScope scope)
+    {
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _scope = scope ?? throw new ArgumentNullException(nameof(scope));
+    }
+
+    public async Task<PaymentResult> ProcessAsync(PaymentRequest request, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        
+        // Processing logic...
+        return PaymentResult.Success();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed)
+            return;
+
+        try
+        {
+            _httpClient?.Dispose();
+            
+            if (_scope is IAsyncDisposable asyncDisposableScope)
+            {
+                await asyncDisposableScope.DisposeAsync();
+            }
+            else
+            {
+                _scope?.Dispose();
+            }
+        }
+        finally
+        {
+            _disposed = true;
+        }
+    }
+}
+
+// Good - Struct for small, immutable data to reduce allocations
+public readonly record struct PaymentId(Guid Value)
+{
+    public static PaymentId New() => new(Guid.NewGuid());
+    public static PaymentId Parse(ReadOnlySpan<char> value) => new(Guid.Parse(value));
+    public override string ToString() => Value.ToString();
+}
+
+// Good - Span<T> and Memory<T> for efficient string operations
+public static class PaymentCardHelper
+{
+    public static string MaskCardNumber(ReadOnlySpan<char> cardNumber)
+    {
+        if (cardNumber.Length != 16)
+            throw new ArgumentException("Card number must be 16 digits", nameof(cardNumber));
+
+        Span<char> masked = stackalloc char[19]; // 16 digits + 3 spaces
+        
+        // Copy first 4 digits
+        cardNumber[..4].CopyTo(masked);
+        masked[4] = ' ';
+        
+        // Mask middle 8 digits
+        "****".AsSpan().CopyTo(masked[5..]);
+        masked[9] = ' ';
+        "****".AsSpan().CopyTo(masked[10..]);
+        masked[14] = ' ';
+        
+        // Copy last 4 digits
+        cardNumber[12..].CopyTo(masked[15..]);
+        
+        return new string(masked);
+    }
+}
+```
+
+### Caching Strategies
+
+```csharp
+// Good - Memory caching with proper cache keys and expiration
+public class PaymentService : IPaymentService
+{
+    private readonly IPaymentRepository _paymentRepository;
+    private readonly IMemoryCache _memoryCache;
+    private readonly IDistributedCache _distributedCache;
+    private readonly ILogger<PaymentService> _logger;
+    
+    private static readonly TimeSpan CustomerCacheExpiry = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan PaymentCacheExpiry = TimeSpan.FromMinutes(5);
+
+    public PaymentService(
+        IPaymentRepository paymentRepository,
+        IMemoryCache memoryCache,
+        IDistributedCache distributedCache,
+        ILogger<PaymentService> logger)
+    {
+        _paymentRepository = paymentRepository;
+        _memoryCache = memoryCache;
+        _distributedCache = distributedCache;
+        _logger = logger;
+       }
+
+    public async Task<Customer?> GetCustomerAsync(CustomerId customerId, CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"customer:{customerId}";
+        
+        // Try memory cache first
+        if (_memoryCache.TryGetValue(cacheKey, out Customer? cachedCustomer))
+        {
+            _logger.LogDebug("Customer {CustomerId} found in memory cache", customerId);
+            return cachedCustomer;
+        }
+
+        // Try distributed cache
+        var distributedCacheValue = await _distributedCache.GetStringAsync(cacheKey, cancellationToken);
+        if (!string.IsNullOrEmpty(distributedCacheValue))
+        {
+            var customer = JsonSerializer.Deserialize<Customer>(distributedCacheValue);
+            
+            // Add to memory cache for faster future access
+            _memoryCache.Set(cacheKey, customer, CustomerCacheExpiry);
+            
+            _logger.LogDebug("Customer {CustomerId} found in distributed cache", customerId);
+            return customer;
+        }
+
+        // Fetch from repository
+        var customerFromDb = await _customerRepository.GetByIdAsync(customerId, cancellationToken);
+        if (customerFromDb is not null)
+        {
+            // Cache in both memory and distributed cache
+            _memoryCache.Set(cacheKey, customerFromDb, CustomerCacheExpiry);
+            
+            var serializedCustomer = JsonSerializer.Serialize(customerFromDb);
+            await _distributedCache.SetStringAsync(
+                cacheKey, 
+                serializedCustomer, 
+                new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = CustomerCacheExpiry },
+                cancellationToken);
+            
+            _logger.LogDebug("Customer {CustomerId} cached from database", customerId);
+        }
+
+        return customerFromDb;
+    }
+
+    public async Task InvalidateCustomerCacheAsync(CustomerId customerId, CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"customer:{customerId}";
+        
+        _memoryCache.Remove(cacheKey);
+        await _distributedCache.RemoveAsync(cacheKey, cancellationToken);
+        
+        _logger.LogDebug("Customer {CustomerId} cache invalidated", customerId);
+    }
+}
+
+// Good - Cache-aside pattern with cache warming
+public class PaymentAnalyticsService : IPaymentAnalyticsService
+{
+    private readonly IPaymentRepository _paymentRepository;
+    private readonly IDistributedCache _distributedCache;
+    private readonly ILogger<PaymentAnalyticsService> _logger;
+
+    public async Task<PaymentAnalytics> GetPaymentAnalyticsAsync(
+        CustomerId customerId, 
+        DateOnly date, 
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"analytics:payments:{customerId}:{date:yyyy-MM-dd}";
+        
+        var cachedAnalytics = await GetFromCacheAsync<PaymentAnalytics>(cacheKey, cancellationToken);
+        if (cachedAnalytics is not null)
+        {
+            return cachedAnalytics;
+        }
+
+        var analytics = await CalculatePaymentAnalyticsAsync(customerId, date, cancellationToken);
+        
+        // Cache for 1 hour, but longer for older dates (they won't change)
+        var expiry = date == DateOnly.FromDateTime(DateTime.UtcNow) 
+            ? TimeSpan.FromHours(1) 
+            : TimeSpan.FromDays(1);
+            
+        await SetCacheAsync(cacheKey, analytics, expiry, cancellationToken);
+        
+        return analytics;
+    }
+
+    private async Task<T?> GetFromCacheAsync<T>(string cacheKey, CancellationToken cancellationToken)
+        where T : class
+    {
+        try
+        {
+            var cachedValue = await _distributedCache.GetStringAsync(cacheKey, cancellationToken);
+            return string.IsNullOrEmpty(cachedValue) 
+                ? null 
+                : JsonSerializer.Deserialize<T>(cachedValue);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to get value from cache for key {CacheKey}", cacheKey);
+            return null;
+        }
+    }
+
+    private async Task SetCacheAsync<T>(string cacheKey, T value, TimeSpan expiry, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var serializedValue = JsonSerializer.Serialize(value);
+            var options = new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = expiry
+            };
+            
+            await _distributedCache.SetStringAsync(cacheKey, serializedValue, options, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to set cache for key {CacheKey}", cacheKey);
+        }
+    }
+}
+```
+
+## Security Best Practices
+
+### Input Validation and Sanitization
+
+```csharp
+// Good - Comprehensive input validation using FluentValidation
+public class CreateCustomerRequestValidator : AbstractValidator<CreateCustomerRequest>
+{
+    public CreateCustomerRequestValidator()
+    {
+        RuleFor(x => x.Email)
+            .NotEmpty()
+            .EmailAddress()
+            .MaximumLength(320)
+            .WithMessage("Email must be a valid email address with maximum 320 characters");
+
+        RuleFor(x => x.FirstName)
+            .NotEmpty()
+            .MaximumLength(100)
+            .Matches(@"^[a-zA-Z\s\-'\.]+$")
+            .WithMessage("First name can only contain letters, spaces, hyphens, apostrophes, and periods");
+
+        RuleFor(x => x.LastName)
+            .NotEmpty()
+            .MaximumLength(100)
+            .Matches(@"^[a-zA-Z\s\-'\.]+$")
+            .WithMessage("Last name can only contain letters, spaces, hyphens, apostrophes, and periods");
+
+        RuleFor(x => x.PhoneNumber)
+            .Matches(@"^\+?[1-9]\d{1,14}$")
+            .When(x => !string.IsNullOrEmpty(x.PhoneNumber))
+            .WithMessage("Phone number must be in international format");
+
+        RuleFor(x => x.DateOfBirth)
+            .LessThan(DateTime.UtcNow.AddYears(-18))
+            .GreaterThan(DateTime.UtcNow.AddYears(-120))
+            .WithMessage("Customer must be between 18 and 120 years old");
+    }
+}
+
+// Good - SQL injection prevention with parameterized queries
+public class PaymentRepository : IPaymentRepository
+{
+    private readonly PaymentDbContext _context;
+
+    // Entity Framework automatically parameterizes queries
+    public async Task<IReadOnlyList<Payment>> SearchPaymentsAsync(
+        string? cardNumberLast4, 
+        string? customerEmail,
+        CancellationToken cancellationToken = default)
+    {
+        var query = _context.Payments.AsQueryable();
+
+        if (!string.IsNullOrEmpty(cardNumberLast4))
+        {
+            // EF Core automatically parameterizes this
+            query = query.Where(p => p.CardNumber.EndsWith(cardNumberLast4));
+        }
+
+        if (!string.IsNullOrEmpty(customerEmail))
+        {
+            query = query.Where(p => p.Customer.Email == customerEmail);
+        }
+
+        return await query.ToListAsync(cancellationToken);
+    }
+
+    // When using raw SQL, always use parameters
+    public async Task<decimal> GetTotalRevenueAsync(DateTime startDate, DateTime endDate, CancellationToken cancellationToken = default)
+    {
+        return await _context.Database
+            .SqlQuery<decimal>($"SELECT SUM(amount) FROM payments WHERE created_at BETWEEN {startDate} AND {endDate} AND status = 'Completed'")
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+}
+
+// Good - XSS prevention with proper encoding
+public class PaymentReportService : IPaymentReportService
+{
+    public async Task<string> GenerateHtmlReportAsync(IReadOnlyList<Payment> payments)
+    {
+        var html = new StringBuilder();
+        html.AppendLine("<html><body>");
+        html.AppendLine("<h1>Payment Report</h1>");
+        html.AppendLine("<table>");
+        html.AppendLine("<tr><th>ID</th><th>Amount</th><th>Customer</th><th>Status</th></tr>");
+
+        foreach (var payment in payments)
+        {
+            html.AppendLine("<tr>");
+            html.AppendLine($"<td>{HtmlEncoder.Default.Encode(payment.Id.ToString())}</td>");
+            html.AppendLine($"<td>{HtmlEncoder.Default.Encode(payment.Amount.ToString("C"))}</td>");
+            html.AppendLine($"<td>{HtmlEncoder.Default.Encode(payment.Customer.Email)}</td>");
+            html.AppendLine($"<td>{HtmlEncoder.Default.Encode(payment.Status.ToString())}</td>");
+            html.AppendLine("</tr>");
+        }
+
+        html.AppendLine("</table>");
+        html.AppendLine("</body></html>");
+
+        return html.ToString();
+    }
+}
+```
+
+### Authentication and Authorization
+
+```csharp
+// Good - JWT authentication configuration
+public static class AuthenticationExtensions
+{
+    public static IServiceCollection AddJwtAuthentication(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        var jwtSettings = configuration.GetSection("Jwt").Get<JwtSettings>()
+            ?? throw new InvalidOperationException("JWT settings not found");
+
+        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            .AddJwtBearer(options =>
+            {
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidateAudience = true,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    ValidIssuer = jwtSettings.Issuer,
+                    ValidAudience = jwtSettings.Audience,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSettings.SecretKey)),
+                    ClockSkew = TimeSpan.FromMinutes(5)
+                };
+
+                options.Events = new JwtBearerEvents
+                {
+                    OnAuthenticationFailed = context =>
+                    {
+                        var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
+                        logger.LogWarning("Authentication failed: {Error}", context.Exception.Message);
+                        return Task.CompletedTask;
+                    },
+                    OnTokenValidated = context =>
+                    {
+                        var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
+                        logger.LogDebug("Token validated for user: {UserId}", context.Principal?.Identity?.Name);
+                        return Task.CompletedTask;
+                    }
+                };
+            });
+
+        return services;
+    }
+}
+
+// Good - Custom authorization policies
+public static class AuthorizationExtensions
+{
+    public static IServiceCollection AddCustomAuthorization(this IServiceCollection services)
+    {
+        services.AddAuthorization(options =>
+        {
+            options.AddPolicy("RequireAdminRole", policy =>
+                policy.RequireRole("Admin"));
+
+            options.AddPolicy("RequireManagerOrAdmin", policy =>
+                policy.RequireRole("Manager", "Admin"));
+
+            options.AddPolicy("RequirePaymentAccess", policy =>
+                policy.RequireAssertion(context =>
+                    context.User.HasClaim("permission", "payments:read") ||
+                    context.User.IsInRole("Admin")));
+
+            options.AddPolicy("RequireResourceOwnership", policy =>
+                policy.Requirements.Add(new ResourceOwnershipRequirement()));
+        });
+
+        services.AddScoped<IAuthorizationHandler, ResourceOwnershipHandler>();
+        return services;
+    }
+}
+
+public class ResourceOwnershipRequirement : IAuthorizationRequirement { }
+
+public class ResourceOwnershipHandler : AuthorizationHandler<ResourceOwnershipRequirement>
+{
+    private readonly IHttpContextAccessor _httpContextAccessor;
+
+    public ResourceOwnershipHandler(IHttpContextAccessor httpContextAccessor)
+    {
+        _httpContextAccessor = httpContextAccessor;
+    }
+
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context,
+        ResourceOwnershipRequirement requirement)
+    {
+        var httpContext = _httpContextAccessor.HttpContext;
+        if (httpContext is null)
+        {
+            context.Fail();
+            return Task.CompletedTask;
+        }
+
+        var userIdClaim = context.User.FindFirst("sub")?.Value;
+        var resourceUserId = httpContext.Request.RouteValues["userId"]?.ToString();
+
+        if (userIdClaim == resourceUserId || context.User.IsInRole("Admin"))
+        {
+            context.Succeed(requirement);
+        }
+        else
+        {
+            context.Fail();
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+// Good - Secure controller with proper authorization
+[ApiController]
+[Route("api/[controller]")]
+[Authorize]
+public class PaymentsController : ControllerBase
+{
+    [HttpGet]
+    [Authorize(Policy = "RequirePaymentAccess")]
+    public async Task<ActionResult<PagedResponse<PaymentResponse>>> GetPayments(
+        [FromQuery] GetPaymentsRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        // Implementation...
+    }
+
+    [HttpGet("{id:guid}")]
+    [Authorize(Policy = "RequireResourceOwnership")]
+    public async Task<ActionResult<PaymentResponse>> GetPayment(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        // Implementation...
+    }
+
+    [HttpPost]
+    [Authorize(Roles = "User,Manager,Admin")]
+    public async Task<ActionResult<PaymentResponse>> CreatePayment(
+        [FromBody] CreatePaymentRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        // Implementation...
+    }
+
+    [HttpDelete("{id:guid}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> DeletePayment(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        // Implementation...
+    }
+}
+```
+
+### Sensitive Data Protection
+
+```csharp
+// Good - Data encryption for sensitive information
+public class EncryptionService : IEncryptionService
+{
+    private readonly byte[] _key;
+    private readonly byte[] _iv;
+
+    public EncryptionService(IOptions<EncryptionOptions> options)
+    {
+        var encryptionOptions = options.Value;
+        _key = Convert.FromBase64String(encryptionOptions.Key);
+        _iv = Convert.FromBase64String(encryptionOptions.IV);
+    }
+
+    public string EncryptString(string plainText)
+    {
+        if (string.IsNullOrEmpty(plainText))
+            return plainText;
+
+        using var aes = Aes.Create();
+        aes.Key = _key;
+        aes.IV = _iv;
+
+        var encryptor = aes.CreateEncryptor();
+        using var msEncrypt = new MemoryStream();
+        using var csEncrypt = new CryptoStream(msEncrypt, encryptor, CryptoStreamMode.Write);
+        using var swEncrypt = new StreamWriter(csEncrypt);
+        
+        swEncrypt.Write(plainText);
+        
+        return Convert.ToBase64String(msEncrypt.ToArray());
+    }
+
+    public string DecryptString(string cipherText)
+    {
+        if (string.IsNullOrEmpty(cipherText))
+            return cipherText;
+
+        using var aes = Aes.Create();
+        aes.Key = _key;
+        aes.IV = _iv;
+
+        var decryptor = aes.CreateDecryptor();
+        using var msDecrypt = new MemoryStream(Convert.FromBase64String(cipherText));
+        using var csDecrypt = new CryptoStream(msDecrypt, decryptor, CryptoStreamMode.Read);
+        using var srDecrypt = new StreamReader(csDecrypt);
+        
+        return srDecrypt.ReadToEnd();
+    }
+}
+
+// Good - Secure logging that doesn't expose sensitive data
+public static partial class LoggerExtensions
+{
+    [LoggerMessage(EventId = 1001, Level = LogLevel.Information, Message = "Payment {PaymentId} created for customer {CustomerId} with amount {Amount:C}")]
+    public static partial void LogPaymentCreated(this ILogger logger, PaymentId paymentId, CustomerId customerId, decimal amount);
+
+    [LoggerMessage(EventId = 1002, Level = LogLevel.Warning, Message = "Payment {PaymentId} failed validation: {ValidationErrors}")]
+    public static partial void LogPaymentValidationFailed(this ILogger logger, PaymentId paymentId, string validationErrors);
+
+    [LoggerMessage(EventId = 1003, Level = LogLevel.Error, Message = "Payment processing failed for payment {PaymentId}")]
+    public static partial void LogPaymentProcessingFailed(this ILogger logger, PaymentId paymentId, Exception exception);
+
+    // Never log sensitive data like card numbers, CVV, etc.
+    public static void LogPaymentAttempt(this ILogger logger, PaymentRequest request)
+    {
+        // Only log non-sensitive data
+        logger.LogInformation(
+            "Payment attempt: Amount {Amount:C}, Currency {Currency}, Customer {CustomerId}, Card ending {CardLast4}",
+            request.Amount,
+            request.Currency,
+            request.CustomerId,
+            request.CardNumber?.Length >= 4 ? request.CardNumber[^4..] : "****");
+    }
+}
+
+// Good - Secure password hashing
+public class PasswordService : IPasswordService
+{
+    private const int SaltSize = 32;
+    private const int HashSize = 32;
+    private const int Iterations = 100000;
+
+    public string HashPassword(string password)
+    {
+        using var rng = RandomNumberGenerator.Create();
+        var salt = new byte[SaltSize];
+        rng.GetBytes(salt);
+
+        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, Iterations, HashAlgorithmName.SHA256);
+        var hash = pbkdf2.GetBytes(HashSize);
+
+        var hashBytes = new byte[SaltSize + HashSize];
+        Array.Copy(salt, 0, hashBytes, 0, SaltSize);
+        Array.Copy(hash, 0, hashBytes, SaltSize, HashSize);
+
+        return Convert.ToBase64String(hashBytes);
+    }
+
+    public bool VerifyPassword(string password, string hashedPassword)
+    {
+        var hashBytes = Convert.FromBase64String(hashedPassword);
+        var salt = new byte[SaltSize];
+        Array.Copy(hashBytes, 0, salt, 0, SaltSize);
+
+        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, Iterations, HashAlgorithmName.SHA256);
+        var hash = pbkdf2.GetBytes(HashSize);
+
+        for (var i = 0; i < HashSize; i++)
+        {
+            if (hashBytes[i + SaltSize] != hash[i])
+                return false;
+        }
+
+        return true;
+    }
+}
+```
+
+## Monitoring and Observability
+
+### Structured Logging
+
+```csharp
+// Good - Structured logging with correlation IDs and context
+public class PaymentService : IPaymentService
+{
+    private readonly IPaymentRepository _paymentRepository;
+    private readonly ILogger<PaymentService> _logger;
+
+    public async Task<Result<Payment>> ProcessPaymentAsync(
+        PaymentRequest request, 
+        CancellationToken cancellationToken = default)
+    {
+        using var scope = _logger.BeginScope(new Dictionary<string, object>
+        {
+            ["PaymentId"] = PaymentId.New(),
+            ["CustomerId"] = request.CustomerId,
+            ["Amount"] = request.Amount,
+            ["Currency"] = request.Currency
+        });
+
+        _logger.LogInformation("Starting payment processing");
+
+        try
+        {
+            var validationResult = await ValidatePaymentAsync(request, cancellationToken);
+            if (!validationResult.IsValid)
+            {
+                _logger.LogWarning("Payment validation failed: {ValidationErrors}", 
+                    string.Join(", ", validationResult.Errors));
+                return Result<Payment>.Failure("Validation failed");
+            }
+
+            var payment = await CreatePaymentAsync(request, cancellationToken);
+            
+            _logger.LogInformation("Payment {PaymentId} processed successfully", payment.Id);
+            return Result<Payment>.Success(payment);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Payment processing failed");
+            return Result<Payment>.Failure("Payment processing failed");
+        }
+    }
+}
+
+// Good - Activity and tracing for distributed systems
+public class PaymentGatewayService : IPaymentGatewayService
+{
+    private static readonly ActivitySource ActivitySource = new("PaymentGateway");
+    private readonly HttpClient _httpClient;
+    private readonly ILogger<PaymentGatewayService> _logger;
+
+    public async Task<AuthorizationResult> AuthorizePaymentAsync(
+        AuthorizationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        using var activity = ActivitySource.StartActivity("payment.authorize");
+        activity?.SetTag("payment.amount", request.Amount.ToString());
+        activity?.SetTag("payment.currency", request.Currency);
+        activity?.SetTag("customer.id", request.CustomerId.ToString());
+
+        try
+        {
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/authorize")
+            {
+                Content = JsonContent.Create(request)
+            };
+
+            var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
+            
+            activity?.SetTag("http.status_code", (int)response.StatusCode);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<AuthorizationResult>(cancellationToken: cancellationToken);
+                activity?.SetTag("authorization.result", "success");
+                return result!;
+            }
+
+            activity?.SetTag("authorization.result", "failed");
+            activity?.SetStatus(ActivityStatusCode.Error, "Authorization failed");
+            
+            return AuthorizationResult.Failed("Gateway authorization failed");
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            _logger.LogError(ex, "Payment authorization failed");
+            throw;
+        }
+    }
+}
+```
+
+### Health Checks
+
+```csharp
+// Good - Comprehensive health checks
+public static class HealthCheckExtensions
+{
+    public static IServiceCollection AddCustomHealthChecks(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddHealthChecks()
+            .AddDbContextCheck<PaymentDbContext>("database")
+            .AddRedis(configuration.GetConnectionString("Redis")!, "redis")
+            .AddRabbitMQ(rabbitConnectionString: configuration.GetConnectionString("RabbitMQ")!, name: "rabbitmq")
+            .AddUrlGroup(new Uri($"{configuration["PaymentGateway:BaseUrl"]}/health"), "payment-gateway")
+            .AddCheck<PaymentServiceHealthCheck>("payment-service")
+            .AddCheck<FileSystemHealthCheck>("filesystem");
+
+        return services;
+    }
+}
+
+public class PaymentServiceHealthCheck : IHealthCheck
+{
+    private readonly IPaymentRepository _paymentRepository;
+    private readonly ILogger<PaymentServiceHealthCheck> _logger;
+
+    public PaymentServiceHealthCheck(
+        IPaymentRepository paymentRepository,
+        ILogger<PaymentServiceHealthCheck> logger)
+    {
+        _paymentRepository = paymentRepository;
+        _logger = logger;
+    }
+
+    public async Task<HealthCheckResult> CheckHealthAsync(
+        HealthCheckContext context,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            // Test database connectivity by checking if we can count payments
+            var canConnectToDatabase = await TestDatabaseConnectionAsync(cancellationToken);
+            if (!canConnectToDatabase)
+            {
+                return HealthCheckResult.Unhealthy("Cannot connect to payment database");
+            }
+
+            // Test critical business functionality
+            var canProcessPayments = await TestPaymentProcessingAsync(cancellationToken);
+            if (!canProcessPayments)
+            {
+                return HealthCheckResult.Degraded("Payment processing may be impaired");
+            }
+
+            return HealthCheckResult.Healthy("Payment service is healthy");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Health check failed");
+            return HealthCheckResult.Unhealthy("Payment service health check failed", ex);
+        }
+    }
+
+    private async Task<bool> TestDatabaseConnectionAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Simple query to test database connectivity
+            var recentPayments = await _paymentRepository.GetPagedAsync(1, 1, cancellationToken: cancellationToken);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task<bool> TestPaymentProcessingAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Test payment validation logic without hitting external services
+            var testRequest = new PaymentRequestBuilder()
+                .WithAmount(100m)
+                .WithCurrency("GBP")
+                .Build();
+
+            var validator = new PaymentRequestValidator();
+            var validationResult = await validator.ValidateAsync(testRequest, cancellationToken);
+            
+            return validationResult.IsValid;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
+public class FileSystemHealthCheck : IHealthCheck
+{
+    private readonly IWebHostEnvironment _environment;
+
+    public FileSystemHealthCheck(IWebHostEnvironment environment)
+    {
+        _environment = environment;
+    }
+
+    public Task<HealthCheckResult> CheckHealthAsync(
+        HealthCheckContext context,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var tempPath = Path.Combine(_environment.ContentRootPath, "temp");
+            
+            // Ensure temp directory exists
+            Directory.CreateDirectory(tempPath);
+            
+            // Test write permissions
+            var testFile = Path.Combine(tempPath, $"healthcheck_{Guid.NewGuid()}.tmp");
+            File.WriteAllText(testFile, "health check test");
+            
+            // Test read permissions
+            var content = File.ReadAllText(testFile);
+            
+            // Cleanup
+            File.Delete(testFile);
+            
+            return Task.FromResult(HealthCheckResult.Healthy("File system is accessible"));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(HealthCheckResult.Unhealthy("File system access failed", ex));
+        }
+    }
+}
+
+// Register health checks in Program.cs
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+        
+        var result = JsonSerializer.Serialize(new
+        {
+            status = report.Status.ToString(),
+            checks = report.Entries.Select(e => new
+            {
+                name = e.Key,
+                status = e.Value.Status.ToString(),
+                exception = e.Value.Exception?.Message,
+                duration = e.Value.Duration.ToString()
+            })
+        });
+        
+        await context.Response.WriteAsync(result);
+    }
+});
+
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
+
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = _ => false
+});
+```
+
+### Metrics and Telemetry
+
+```csharp
+// Good - Custom metrics for business operations
+public class PaymentMetrics
+{
+    private readonly Counter<int> _paymentsProcessed;
+    private readonly Counter<int> _paymentsFailed;
+    private readonly Histogram<double> _paymentProcessingTime;
+    private readonly Histogram<double> _paymentAmount;
+
+    public PaymentMetrics(IMeterFactory meterFactory)
+    {
+        var meter = meterFactory.Create("PaymentService");
+        
+        _paymentsProcessed = meter.CreateCounter<int>(
+            "payments_processed_total",
+            "Total number of payments processed");
+            
+        _paymentsFailed = meter.CreateCounter<int>(
+            "payments_failed_total", 
+            "Total number of failed payments");
+            
+        _paymentProcessingTime = meter.CreateHistogram<double>(
+            "payment_processing_duration_seconds",
+            "Payment processing duration in seconds");
+            
+        _paymentAmount = meter.CreateHistogram<double>(
+            "payment_amount",
+            "Payment amounts");
+    }
+
+    public void RecordPaymentProcessed(string currency, string status, double processingTimeSeconds, double amount)
+    {
+        _paymentsProcessed.Add(1, new KeyValuePair<string, object?>("currency", currency), 
+                                  new KeyValuePair<string, object?>("status", status));
+        _paymentProcessingTime.Record(processingTimeSeconds);
+        _paymentAmount.Record(amount, new KeyValuePair<string, object?>("currency", currency));
+    }
+
+    public void RecordPaymentFailed(string currency, string errorType)
+    {
+        _paymentsFailed.Add(1, new KeyValuePair<string, object?>("currency", currency),
+                               new KeyValuePair<string, object?>("error_type", errorType));
+    }
+}
+
+public class PaymentService : IPaymentService
+{
+    private readonly PaymentMetrics _metrics;
+    private readonly ILogger<PaymentService> _logger;
+
+    public async Task<Result<Payment>> ProcessPaymentAsync(
+        PaymentRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        
+        try
+        {
+            var payment = await ProcessPaymentInternalAsync(request, cancellationToken);
+            
+            stopwatch.Stop();
+            _metrics.RecordPaymentProcessed(
+                request.Currency,
+                "success",
+                stopwatch.Elapsed.TotalSeconds,
+                (double)request.Amount);
+                
+            return Result<Payment>.Success(payment);
+        }
+        catch (Exception ex)
+        {
+            stopwatch.Stop();
+            _metrics.RecordPaymentFailed(request.Currency, ex.GetType().Name);
+            
+            _logger.LogError(ex, "Payment processing failed");
+            return Result<Payment>.Failure("Payment processing failed");
+        }
     }
 }
 ```
