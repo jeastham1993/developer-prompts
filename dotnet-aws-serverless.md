@@ -6,6 +6,8 @@
 
 I follow Test-Driven Development (TDD) with a strong emphasis on behavior-driven testing and functional programming principles. All work should be done in small, incremental changes that maintain a working state throughout development.
 
+I also follow 'serverless-first' thinking, choosing AWS serverless technologies as the deployment model of choice. Prioritizing AWS Lambda for compute.
+
 ## Quick Reference
 
 **Key Principles:**
@@ -25,6 +27,601 @@ I follow Test-Driven Development (TDD) with a strong emphasis on behavior-driven
 - **State Management**: Prefer immutable patterns and records
 - **Validation**: FluentValidation
 - **Serialization**: System.Text.Json
+- **Deployment** Single purpose Lambda functions, with a separate function for each
+
+## AWS Serverless Best Practices
+
+### Lambda Function Development
+
+#### Lambda Annotations Framework
+
+Use the [Lambda Annotations Framework](https://github.com/aws/aws-lambda-dotnet/tree/master/Libraries/src/Amazon.Lambda.Annotations) for simplified Lambda function development:
+
+```csharp
+[assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+
+namespace PaymentProcessor.Lambda;
+
+public class PaymentApiFunction
+{
+    private readonly IPaymentService _paymentService;
+    
+    public PaymentApiFunction(IPaymentService paymentService)
+    {
+        _paymentService = paymentService;
+    }
+    
+    [LambdaFunction]
+    [HttpApi(LambdaHttpMethod.Post, "/payments")]
+    public async Task<IHttpResult> ProcessPayment([FromBody] PaymentRequest request)
+    {
+        var result = await _paymentService.ProcessPaymentAsync(request);
+        
+        return result.IsSuccess 
+            ? HttpResults.Ok(result.Value)
+            : HttpResults.BadRequest(result.Error);
+    }
+}
+```
+
+### Dependency Injection and Options Pattern
+
+Use the `[LambdaStartup]` attribute to configure dependency injection and use the options pattern:
+
+```csharp
+
+
+```csharp
+// Configuration
+public class PaymentOptions
+{
+    public const string SectionName = "Payment";
+    
+    public decimal MaxAmount { get; set; } = 10000m;
+    public string[] AcceptedCurrencies { get; set; } = Array.Empty<string>();
+    public string ApiKey { get; set; } = string.Empty;
+    public string BaseUrl { get; set; } = string.Empty;
+}
+
+// Service registration
+[LambdaStartup]
+public class Startup
+{
+    public void ConfigureServices(IServiceCollection services)
+    {
+        services.Configure<PaymentOptions>(
+            configuration.GetSection(PaymentOptions.SectionName));
+
+        services.AddScoped<IPaymentService, PaymentService>();
+        services.AddScoped<IPaymentRepository, PaymentRepository>();
+        services.AddScoped<IValidator<PaymentRequest>, PaymentRequestValidator>();
+        
+        services.AddHttpClient<IPaymentGateway, PaymentGateway>((serviceProvider, client) =>
+        {
+            var options = serviceProvider.GetRequiredService<IOptions<PaymentOptions>>().Value;
+            client.BaseAddress = new Uri(options.BaseUrl);
+            client.DefaultRequestHeaders.Add("X-API-Key", options.ApiKey);
+        });
+
+        return services;
+    }
+}
+
+// Service implementation
+public class PaymentService : IPaymentService
+{
+    private readonly IPaymentRepository _paymentRepository;
+    private readonly IValidator<PaymentRequest> _validator;
+    private readonly ILogger<PaymentService> _logger;
+    private readonly PaymentOptions _options;
+
+    public PaymentService(
+        IPaymentRepository paymentRepository,
+        IValidator<PaymentRequest> validator,
+        ILogger<PaymentService> logger,
+        IOptions<PaymentOptions> options)
+    {
+        _paymentRepository = paymentRepository ?? throw new ArgumentNullException(nameof(paymentRepository));
+        _validator = validator ?? throw new ArgumentNullException(nameof(validator));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
+    }
+
+    public async Task<Result<Payment>> ProcessPaymentAsync(
+        PaymentRequest request, 
+        CancellationToken cancellationToken = default)
+    {
+        var validationResult = await _validator.ValidateAsync(request, cancellationToken);
+        if (!validationResult.IsValid)
+        {
+            var errors = string.Join(", ", validationResult.Errors.Select(e => e.ErrorMessage));
+            return ResultExtensions.Failure<Payment>($"Validation failed: {errors}");
+        }
+
+        if (request.Amount > _options.MaxAmount)
+        {
+            return ResultExtensions.Failure<Payment>($"Amount exceeds maximum allowed: {_options.MaxAmount}");
+        }
+
+        // Process payment...
+        return ResultExtensions.Success(new Payment(PaymentId.New(), request.Amount, request.Currency));
+    }
+}
+```
+
+#### Compilation Strategy
+
+**Synchronous Functions (APIs, Real-time Processing):**
+- Use Native AOT compilation for faster cold starts and better performance
+- Ensure all dependencies support AOT compilation
+- Test thoroughly with AOT-specific constraints
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <PublishAot>true</PublishAot>
+    <StripSymbols>true</StripSymbols>
+    <TrimMode>full</TrimMode>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <PackageReference Include="Amazon.Lambda.Annotations" Version="1.5.0" />
+    <PackageReference Include="Amazon.Lambda.AspNetCoreServer.Hosting" Version="1.7.0" />
+  </ItemGroup>
+</Project>
+```
+
+**Asynchronous Functions (Event Processing, Background Tasks):**
+- Use standard .NET compilation for better compatibility
+- Cold start performance is less critical for async workloads
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <PackageReference Include="Amazon.Lambda.Core" Version="2.2.0" />
+    <PackageReference Include="Amazon.Lambda.SQSEvents" Version="2.2.0" />
+    <PackageReference Include="Amazon.Lambda.Serialization.SystemTextJson" Version="2.4.1" />
+  </ItemGroup>
+</Project>
+```
+
+#### AOT-Compatible Libraries
+
+When using Native AOT, ensure all dependencies are compatible:
+
+**Recommended AOT-Compatible Libraries:**
+- `System.Text.Json` (built-in serialization)
+- `Amazon.DynamoDBv2` (low-level client)
+- `Amazon.Lambda.Core`
+- `Amazon.Lambda.Annotations`
+- `FluentValidation` (with proper configuration)
+
+**Avoid for AOT:**
+- `Newtonsoft.Json`
+- Entity Framework Core (use DynamoDB instead)
+- Heavy reflection-based frameworks
+
+### Data Access with DynamoDB
+
+#### Low-Level API Usage
+
+Always use the low-level DynamoDB API for serverless applications to minimize dependencies and improve performance. Avoid the `Scan` operation where possible:
+
+```csharp
+public class PaymentRepository
+{
+    private readonly AmazonDynamoDBClient _dynamoClient;
+    private readonly string _tableName;
+    
+    public PaymentRepository(AmazonDynamoDBClient dynamoClient, string tableName)
+    {
+        _dynamoClient = dynamoClient;
+        _tableName = tableName;
+    }
+    
+    public async Task<Payment?> GetPaymentAsync(string paymentId)
+    {
+        var request = new GetItemRequest
+        {
+            TableName = _tableName,
+            Key = new Dictionary<string, AttributeValue>
+            {
+                ["PK"] = new AttributeValue { S = $"PAYMENT#{paymentId}" },
+                ["SK"] = new AttributeValue { S = $"PAYMENT#{paymentId}" }
+            }
+        };
+        
+        var response = await _dynamoClient.GetItemAsync(request);
+        
+        return response.IsItemSet 
+            ? MapToPayment(response.Item)
+            : null;
+    }
+    
+    public async Task SavePaymentAsync(Payment payment)
+    {
+        var item = new Dictionary<string, AttributeValue>
+        {
+            ["PK"] = new AttributeValue { S = $"PAYMENT#{payment.Id}" },
+            ["SK"] = new AttributeValue { S = $"PAYMENT#{payment.Id}" },
+            ["Amount"] = new AttributeValue { N = payment.Amount.ToString() },
+            ["Currency"] = new AttributeValue { S = payment.Currency },
+            ["Status"] = new AttributeValue { S = payment.Status.ToString() },
+            ["CreatedAt"] = new AttributeValue { S = payment.CreatedAt.ToString("O") },
+            ["TTL"] = new AttributeValue { N = DateTimeOffset.UtcNow.AddDays(90).ToUnixTimeSeconds().ToString() }
+        };
+        
+        var request = new PutItemRequest
+        {
+            TableName = _tableName,
+            Item = item,
+            ConditionExpression = "attribute_not_exists(PK)"
+        };
+        
+        await _dynamoClient.PutItemAsync(request);
+    }
+}
+```
+
+#### Data Access Pattern Documentation
+
+**Single Table Design Pattern:**
+```csharp
+// Primary Key Design
+// PK = PAYMENT#{PaymentId} | SK = PAYMENT#{PaymentId}     // Payment entity
+// PK = CUSTOMER#{CustomerId} | SK = PAYMENT#{PaymentId}   // Customer's payments (GSI)
+// PK = DATE#{YYYY-MM-DD} | SK = PAYMENT#{PaymentId}       // Payments by date (GSI)
+
+public record PaymentEntity
+{
+    public string PK { get; init; } = default!;  // PAYMENT#{PaymentId}
+    public string SK { get; init; } = default!;  // PAYMENT#{PaymentId}
+    public string GSI1PK { get; init; } = default!;  // CUSTOMER#{CustomerId}
+    public string GSI1SK { get; init; } = default!;  // PAYMENT#{PaymentId}
+    public string GSI2PK { get; init; } = default!;  // DATE#{YYYY-MM-DD}
+    public string GSI2SK { get; init; } = default!;  // PAYMENT#{PaymentId}
+    public decimal Amount { get; init; }
+    public string Currency { get; init; } = default!;
+    public PaymentStatus Status { get; init; }
+    public DateTime CreatedAt { get; init; }
+    public long TTL { get; init; }  // Auto-expire old records
+}
+```
+
+**Query Patterns:**
+1. Get payment by ID: Query PK = PAYMENT#{PaymentId}
+2. Get customer's payments: Query GSI1PK = CUSTOMER#{CustomerId}
+3. Get payments by date range: Query GSI2PK = DATE#{YYYY-MM-DD}
+
+#### Repository Pattern
+
+Implement repository pattern for complex queries and data access abstraction:
+
+```csharp
+public interface IPaymentRepository
+{
+    Task<Payment?> GetByIdAsync(PaymentId id, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<Payment>> GetByCustomerIdAsync(CustomerId customerId, CancellationToken cancellationToken = default);
+    Task<PagedResult<Payment>> GetPagedAsync(int page, int pageSize, PaymentStatus? status = null, 
+        DateTime? fromDate = null, DateTime? toDate = null, CancellationToken cancellationToken = default);
+    Task AddAsync(Payment payment, CancellationToken cancellationToken = default);
+    Task UpdateAsync(Payment payment, CancellationToken cancellationToken = default);
+    Task DeleteAsync(PaymentId id, CancellationToken cancellationToken = default);
+    Task<bool> ExistsAsync(PaymentId id, CancellationToken cancellationToken = default);
+    Task<decimal> GetTotalAmountByCustomerAsync(CustomerId customerId, DateTime fromDate, DateTime toDate, 
+        CancellationToken cancellationToken = default);
+}
+
+public class PaymentRepository : IPaymentRepository
+{
+    private readonly AmazonDynamoDBClient _ddbClient;
+    private readonly ILogger<PaymentRepository> _logger;
+
+    public PaymentRepository(AmazonDynamoDBClient ddbClient, ILogger<PaymentRepository> logger)
+    {
+        _ddbClient = ddbClient ?? throw new ArgumentNullException(nameof(ddbClient));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+
+    // Implementations go here.
+}
+```
+
+### Event-Driven Messaging
+
+#### CloudEvents Integration
+
+Use CloudEvents as a wrapper for all event publishing to ensure standardization and interoperability:
+
+```csharp
+public class PaymentEventPublisher
+{
+    private readonly IAmazonEventBridge _eventBridge;
+    private readonly string _eventBusName;
+    
+    public PaymentEventPublisher(IAmazonEventBridge eventBridge, string eventBusName)
+    {
+        _eventBridge = eventBridge;
+        _eventBusName = eventBusName;
+    }
+    
+    public async Task PublishPaymentProcessedAsync(Payment payment)
+    {
+        var cloudEvent = new CloudEvent
+        {
+            Id = Guid.NewGuid().ToString(),
+            Source = new Uri("https://api.payment-processor.com/payments"),
+            Type = "com.paymentprocessor.payment.processed.v1",
+            Time = DateTimeOffset.UtcNow,
+            Subject = payment.Id,
+            Data = new PaymentProcessedEvent
+            {
+                PaymentId = payment.Id,
+                CustomerId = payment.CustomerId,
+                Amount = payment.Amount,
+                Currency = payment.Currency,
+                ProcessedAt = payment.ProcessedAt
+            }
+        };
+        
+        var eventDetail = JsonSerializer.Serialize(cloudEvent, JsonOptions.Default);
+        
+        var putEventsRequest = new PutEventsRequest
+        {
+            Entries = new List<PutEventsRequestEntry>
+            {
+                new()
+                {
+                    Source = cloudEvent.Source.ToString(),
+                    DetailType = cloudEvent.Type,
+                    Detail = eventDetail,
+                    EventBusName = _eventBusName,
+                    Time = cloudEvent.Time?.DateTime ?? DateTime.UtcNow
+                }
+            }
+        };
+        
+        await _eventBridge.PutEventsAsync(putEventsRequest);
+    }
+}
+```
+
+#### Message Handling with OpenTelemetry
+
+Implement OpenTelemetry semantic conventions for messaging operations:
+
+```csharp
+public class PaymentEventHandler
+{
+    private static readonly ActivitySource ActivitySource = new("PaymentProcessor.Events");
+    private readonly ILogger<PaymentEventHandler> _logger;
+    
+    public PaymentEventHandler(ILogger<PaymentEventHandler> logger)
+    {
+        _logger = logger;
+    }
+    
+    [LambdaFunction]
+    public async Task<string> HandlePaymentEvent(SQSEvent sqsEvent)
+    {
+        foreach (var record in sqsEvent.Records)
+        {
+            using var activity = ActivitySource.StartActivity("payment.event.process");
+            
+            // OpenTelemetry semantic conventions for messaging
+            activity?.SetTag("messaging.system", "aws_sqs");
+            activity?.SetTag("messaging.destination.name", record.EventSourceArn?.Split(':').Last());
+            activity?.SetTag("messaging.operation", "process");
+            activity?.SetTag("messaging.message.id", record.MessageId);
+            activity?.SetTag("messaging.message.conversation_id", record.MessageId);
+            activity?.SetTag("cloud.provider", "aws");
+            activity?.SetTag("cloud.service.name", "sqs");
+            
+            try
+            {
+                var cloudEvent = JsonSerializer.Deserialize<CloudEvent>(record.Body, JsonOptions.Default);
+                
+                activity?.SetTag("messaging.message.payload_size_bytes", record.Body.Length);
+                activity?.SetTag("cloudevents.event_id", cloudEvent?.Id);
+                activity?.SetTag("cloudevents.event_type", cloudEvent?.Type);
+                activity?.SetTag("cloudevents.event_source", cloudEvent?.Source?.ToString());
+                
+                await ProcessCloudEventAsync(cloudEvent!);
+                
+                activity?.SetStatus(ActivityStatusCode.Ok);
+                _logger.LogInformation("Successfully processed payment event {EventId}", cloudEvent?.Id);
+            }
+            catch (Exception ex)
+            {
+                activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+                activity?.SetTag("error.type", ex.GetType().Name);
+                
+                _logger.LogError(ex, "Failed to process payment event {MessageId}", record.MessageId);
+                throw;
+            }
+        }
+        
+        return "Success";
+    }
+    
+    private async Task ProcessCloudEventAsync(CloudEvent cloudEvent)
+    {
+        using var activity = ActivitySource.StartActivity($"payment.event.{ExtractEventAction(cloudEvent.Type)}");
+        
+        activity?.SetTag("cloudevents.event_id", cloudEvent.Id);
+        activity?.SetTag("cloudevents.event_type", cloudEvent.Type);
+        activity?.SetTag("cloudevents.event_subject", cloudEvent.Subject);
+        
+        switch (cloudEvent.Type)
+        {
+            case "com.paymentprocessor.payment.processed.v1":
+                var paymentEvent = JsonSerializer.Deserialize<PaymentProcessedEvent>(
+                    cloudEvent.Data?.ToString() ?? string.Empty, JsonOptions.Default);
+                await HandlePaymentProcessedAsync(paymentEvent!);
+                break;
+                
+            default:
+                _logger.LogWarning("Unknown event type: {EventType}", cloudEvent.Type);
+                break;
+        }
+    }
+    
+    private static string ExtractEventAction(string? eventType)
+    {
+        return eventType?.Split('.').LastOrDefault() ?? "unknown";
+    }
+}
+```
+
+#### Tracing Configuration
+
+Configure OpenTelemetry tracing for Lambda functions:
+
+```csharp
+public class Startup
+{
+    public void ConfigureServices(IServiceCollection services)
+    {
+        services.AddOpenTelemetry()
+            .WithTracing(builder =>
+            {
+                builder.AddSource("PaymentProcessor.Events")
+                       .AddAWSInstrumentation()
+                       .AddHttpClientInstrumentation()
+                       .SetSampler(new AlwaysOnSampler())
+                       .AddOtlpExporter();
+            });
+            
+        services.AddAWSService<IAmazonEventBridge>();
+        services.AddAWSService<AmazonDynamoDBClient>();
+        
+        // Register application services
+        services.AddScoped<IPaymentService, PaymentService>();
+        services.AddScoped<PaymentRepository>();
+        services.AddScoped<PaymentEventPublisher>();
+    }
+}
+```
+
+### Testing Serverless Applications
+
+#### Integration Testing with Testcontainers
+
+```csharp
+public class PaymentLambdaIntegrationTests : IAsyncLifetime
+{
+    private readonly DynamoDbContainer _dynamoContainer;
+    private readonly LocalStackContainer _localStackContainer;
+    private AmazonDynamoDBClient _dynamoClient = default!;
+    private IAmazonEventBridge _eventBridgeClient = default!;
+    
+    public PaymentLambdaIntegrationTests()
+    {
+        _dynamoContainer = new DynamoDbBuilder()
+            .WithImage("amazon/dynamodb-local:latest")
+            .Build();
+            
+        _localStackContainer = new LocalStackBuilder()
+            .WithServices(LocalStackContainer.Service.EventBridge)
+            .Build();
+    }
+    
+    public async Task InitializeAsync()
+    {
+        await _dynamoContainer.StartAsync();
+        await _localStackContainer.StartAsync();
+        
+        _dynamoClient = new AmazonDynamoDBClient(new AmazonDynamoDBConfig
+        {
+            ServiceURL = _dynamoContainer.GetConnectionString()
+        });
+        
+        _eventBridgeClient = new AmazonEventBridgeClient(new AmazonEventBridgeConfig
+        {
+            ServiceURL = _localStackContainer.GetConnectionString()
+        });
+        
+        await CreateTestTableAsync();
+    }
+    
+    [Fact]
+    public async Task ProcessPayment_ShouldStoreInDynamoAndPublishEvent()
+    {
+        // Arrange
+        var paymentRequest = new PaymentRequestBuilder()
+            .WithAmount(100m)
+            .WithCurrency("GBP")
+            .Build();
+            
+        var function = new PaymentApiFunction(
+            new PaymentService(
+                new PaymentRepository(_dynamoClient, "test-payments"),
+                new PaymentEventPublisher(_eventBridgeClient, "test-event-bus")));
+        
+        // Act
+        var result = await function.ProcessPayment(paymentRequest);
+        
+        // Assert
+        result.Should().BeOfType<Ok<Payment>>();
+        
+        // Verify DynamoDB storage
+        var storedPayment = await GetPaymentFromDynamoAsync(paymentRequest.IdempotencyKey);
+        storedPayment.Should().NotBeNull();
+        storedPayment!.Amount.Should().Be(100m);
+        
+        // Verify event publication (would require LocalStack EventBridge setup)
+    }
+}
+```
+
+### Performance Optimization
+
+#### Memory and Resource Management
+
+```csharp
+// Use minimal memory allocation for Lambda functions
+public class OptimizedPaymentProcessor
+{
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+    
+    // Reuse HTTP clients and AWS service clients
+    private static readonly AmazonDynamoDBClient DynamoClient = new();
+    private static readonly HttpClient HttpClient = new();
+    
+    [LambdaFunction]
+    public async Task<APIGatewayProxyResponse> ProcessPayment(APIGatewayProxyRequest request)
+    {
+        // Use spans for memory-efficient string operations
+        var body = request.Body.AsSpan();
+        
+        // Minimize allocations in hot paths
+        using var document = JsonDocument.Parse(body);
+        var paymentRequest = JsonSerializer.Deserialize<PaymentRequest>(document.RootElement, JsonOptions);
+        
+        // Implementation...
+        
+        return new APIGatewayProxyResponse
+        {
+            StatusCode = 200,
+            Body = JsonSerializer.Serialize(result, JsonOptions),
+            Headers = new Dictionary<string, string>
+            {
+                ["Content-Type"] = "application/json"
+            }
+        };
+    }
+}
+```
 
 ## Testing Principles
 
@@ -237,6 +834,8 @@ tests/
   YourApp.Api.Tests/        # API integration tests
   YourApp.Application.Tests/ # Core layer tests
 ```
+
+Inside the .Core library, DO NOT create folders based on technical feature (Entities, DTO's, Services). Instead, create folders based on the actual business value that grouped set of code performs. Loosely following a vertical slice architecture style. A new developer should be able to look at the files/folders inside a project and understand what is is that the application does.
 
 ### C# Language Features
 
@@ -614,89 +1213,6 @@ public static decimal CalculateDiscount(decimal price, Customer customer)
 
 **Exception**: XML documentation comments for public APIs are acceptable when generating documentation, but the code should still be self-explanatory without them.
 
-### Dependency Injection and Options Pattern
-
-Use the built-in DI container and options pattern:
-
-```csharp
-// Configuration
-public class PaymentOptions
-{
-    public const string SectionName = "Payment";
-    
-    public decimal MaxAmount { get; set; } = 10000m;
-    public string[] AcceptedCurrencies { get; set; } = Array.Empty<string>();
-    public string ApiKey { get; set; } = string.Empty;
-    public string BaseUrl { get; set; } = string.Empty;
-}
-
-// Service registration
-public static class ServiceCollectionExtensions
-{
-    public static IServiceCollection AddPaymentServices(
-        this IServiceCollection services,
-        IConfiguration configuration)
-    {
-        services.Configure<PaymentOptions>(
-            configuration.GetSection(PaymentOptions.SectionName));
-
-        services.AddScoped<IPaymentService, PaymentService>();
-        services.AddScoped<IPaymentRepository, PaymentRepository>();
-        services.AddScoped<IValidator<PaymentRequest>, PaymentRequestValidator>();
-        
-        services.AddHttpClient<IPaymentGateway, PaymentGateway>((serviceProvider, client) =>
-        {
-            var options = serviceProvider.GetRequiredService<IOptions<PaymentOptions>>().Value;
-            client.BaseAddress = new Uri(options.BaseUrl);
-            client.DefaultRequestHeaders.Add("X-API-Key", options.ApiKey);
-        });
-
-        return services;
-    }
-}
-
-// Service implementation
-public class PaymentService : IPaymentService
-{
-    private readonly IPaymentRepository _paymentRepository;
-    private readonly IValidator<PaymentRequest> _validator;
-    private readonly ILogger<PaymentService> _logger;
-    private readonly PaymentOptions _options;
-
-    public PaymentService(
-        IPaymentRepository paymentRepository,
-        IValidator<PaymentRequest> validator,
-        ILogger<PaymentService> logger,
-        IOptions<PaymentOptions> options)
-    {
-        _paymentRepository = paymentRepository ?? throw new ArgumentNullException(nameof(paymentRepository));
-        _validator = validator ?? throw new ArgumentNullException(nameof(validator));
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
-    }
-
-    public async Task<Result<Payment>> ProcessPaymentAsync(
-        PaymentRequest request, 
-        CancellationToken cancellationToken = default)
-    {
-        var validationResult = await _validator.ValidateAsync(request, cancellationToken);
-        if (!validationResult.IsValid)
-        {
-            var errors = string.Join(", ", validationResult.Errors.Select(e => e.ErrorMessage));
-            return ResultExtensions.Failure<Payment>($"Validation failed: {errors}");
-        }
-
-        if (request.Amount > _options.MaxAmount)
-        {
-            return ResultExtensions.Failure<Payment>($"Amount exceeds maximum allowed: {_options.MaxAmount}");
-        }
-
-        // Process payment...
-        return ResultExtensions.Success(new Payment(PaymentId.New(), request.Amount, request.Currency));
-    }
-}
-```
-
 ## Development Workflow
 
 ### TDD Process - THE FUNDAMENTAL PRACTICE
@@ -1048,227 +1564,6 @@ public class PaymentEventProcessorTests : IAsyncLifetime
 
 ## API Development and Controllers
 
-### Minimal APIs (Preferred for Simple Endpoints)
-
-Use Minimal APIs for straightforward CRUD operations and simple endpoints:
-
-```csharp
-// Program.cs
-var builder = WebApplication.CreateBuilder(args);
-
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-builder.Services.AddPaymentServices(builder.Configuration);
-
-var app = builder.Build();
-
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
-
-app.UseHttpsRedirection();
-
-// Payment endpoints
-app.MapPost("/api/payments", async (
-    PaymentRequest request,
-    IPaymentService paymentService,
-    IValidator<PaymentRequest> validator,
-    CancellationToken cancellationToken) =>
-{
-    var validationResult = await validator.ValidateAsync(request, cancellationToken);
-    if (!validationResult.IsValid)
-    {
-        return Results.BadRequest(validationResult.Errors);
-    }
-
-    var result = await paymentService.ProcessPaymentAsync(request, cancellationToken);
-    
-    return result switch
-    {
-        Success<Payment> success => Results.Created($"/api/payments/{success.Value.Id}", success.Value),
-        Failure<Payment> failure => Results.BadRequest(new { Error = failure.Error }),
-        _ => Results.Problem("An unexpected error occurred")
-    };
-})
-.WithName("CreatePayment")
-.WithOpenApi();
-
-app.MapGet("/api/payments/{id:guid}", async (
-    Guid id,
-    IPaymentService paymentService,
-    CancellationToken cancellationToken) =>
-{
-    var paymentId = new PaymentId(id);
-    var payment = await paymentService.GetPaymentAsync(paymentId, cancellationToken);
-    
-    return payment is not null 
-        ? Results.Ok(payment) 
-        : Results.NotFound();
-})
-.WithName("GetPayment")
-.WithOpenApi();
-
-app.MapGet("/api/payments", async (
-    IPaymentService paymentService,
-    int page = 1,
-    int pageSize = 20,
-    CancellationToken cancellationToken = default) =>
-{
-    var payments = await paymentService.GetPaymentsAsync(page, pageSize, cancellationToken);
-    return Results.Ok(payments);
-})
-.WithName("GetPayments")
-.WithOpenApi();
-
-app.Run();
-```
-
-### Controller-Based APIs (For Complex Logic)
-
-Use controllers when you need more complex routing, filters, or action-specific behavior:
-
-```csharp
-[ApiController]
-[Route("api/[controller]")]
-[Produces("application/json")]
-public class PaymentsController : ControllerBase
-{
-    private readonly IPaymentService _paymentService;
-    private readonly IValidator<PaymentRequest> _validator;
-    private readonly ILogger<PaymentsController> _logger;
-
-    public PaymentsController(
-        IPaymentService paymentService,
-        IValidator<PaymentRequest> validator,
-        ILogger<PaymentsController> logger)
-    {
-        _paymentService = paymentService ?? throw new ArgumentNullException(nameof(paymentService));
-        _validator = validator ?? throw new ArgumentNullException(nameof(validator));
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-    }
-
-    /// <summary>
-    /// Creates a new payment
-    /// </summary>
-    /// <param name="request">Payment details</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>Created payment</returns>
-    [HttpPost]
-    [ProducesResponseType<PaymentResponse>(StatusCodes.Status201Created)]
-    [ProducesResponseType<ValidationProblemDetails>(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType<ProblemDetails>(StatusCodes.Status500InternalServerError)]
-    public async Task<ActionResult<PaymentResponse>> CreatePayment(
-        [FromBody] PaymentRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        var validationResult = await _validator.ValidateAsync(request, cancellationToken);
-        if (!validationResult.IsValid)
-        {
-            var problemDetails = new ValidationProblemDetails();
-            foreach (var error in validationResult.Errors)
-            {
-                problemDetails.Errors.Add(error.PropertyName, new[] { error.ErrorMessage });
-            }
-            return BadRequest(problemDetails);
-        }
-
-        var result = await _paymentService.ProcessPaymentAsync(request, cancellationToken);
-
-        return result switch
-        {
-            Success<Payment> success => CreatedAtAction(
-                nameof(GetPayment),
-                new { id = success.Value.Id.Value },
-                PaymentResponse.FromPayment(success.Value)),
-            Failure<Payment> failure => BadRequest(new ProblemDetails
-            {
-                Title = "Payment processing failed",
-                Detail = failure.Error,
-                Status = StatusCodes.Status400BadRequest
-            }),
-            _ => StatusCode(StatusCodes.Status500InternalServerError)
-        };
-    }
-
-    /// <summary>
-    /// Gets a payment by ID
-    /// </summary>
-    /// <param name="id">Payment ID</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>Payment details</returns>
-    [HttpGet("{id:guid}")]
-    [ProducesResponseType<PaymentResponse>(StatusCodes.Status200OK)]
-    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<PaymentResponse>> GetPayment(
-        [FromRoute] Guid id,
-        CancellationToken cancellationToken = default)
-    {
-        var paymentId = new PaymentId(id);
-        var payment = await _paymentService.GetPaymentAsync(paymentId, cancellationToken);
-
-        if (payment is null)
-        {
-            return NotFound(new ProblemDetails
-            {
-                Title = "Payment not found",
-                Detail = $"Payment with ID {id} was not found",
-                Status = StatusCodes.Status404NotFound
-            });
-        }
-
-        return Ok(PaymentResponse.FromPayment(payment));
-    }
-
-    /// <summary>
-    /// Gets a paginated list of payments
-    /// </summary>
-    /// <param name="request">Pagination and filter parameters</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>Paginated payment list</returns>
-    [HttpGet]
-    [ProducesResponseType<PagedResponse<PaymentResponse>>(StatusCodes.Status200OK)]
-    [ProducesResponseType<ValidationProblemDetails>(StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<PagedResponse<PaymentResponse>>> GetPayments(
-        [FromQuery] GetPaymentsRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        var validator = new GetPaymentsRequestValidator();
-        var validationResult = await validator.ValidateAsync(request, cancellationToken);
-        
-        if (!validationResult.IsValid)
-        {
-            var problemDetails = new ValidationProblemDetails();
-            foreach (var error in validationResult.Errors)
-            {
-                problemDetails.Errors.Add(error.PropertyName, new[] { error.ErrorMessage });
-            }
-            return BadRequest(problemDetails);
-        }
-
-        var payments = await _paymentService.GetPaymentsAsync(
-            request.Page, 
-            request.PageSize, 
-            request.Status,
-            request.FromDate,
-            request.ToDate,
-            cancellationToken);
-
-        var response = new PagedResponse<PaymentResponse>
-        {
-            Data = payments.Data.Select(PaymentResponse.FromPayment).ToList(),
-            Page = payments.Page,
-            PageSize = payments.PageSize,
-            TotalCount = payments.TotalCount,
-            TotalPages = payments.TotalPages
-        };
-
-        return Ok(response);
-    }
-}
-```
-
 ### Response Models and DTOs
 
 Create dedicated response models that don't expose internal domain structure:
@@ -1356,587 +1651,6 @@ public class GetPaymentsRequestValidator : AbstractValidator<GetPaymentsRequest>
 }
 ```
 
-### Global Error Handling
-
-Implement consistent error handling across the API:
-
-```csharp
-public class GlobalExceptionMiddleware
-{
-    private readonly RequestDelegate _next;
-    private readonly ILogger<GlobalExceptionMiddleware> _logger;
-    private readonly IHostEnvironment _environment;
-
-    public GlobalExceptionMiddleware(
-        RequestDelegate next,
-        ILogger<GlobalExceptionMiddleware> logger,
-        IHostEnvironment environment)
-    {
-        _next = next;
-        _logger = logger;
-        _environment = environment;
-    }
-
-    public async Task InvokeAsync(HttpContext context)
-    {
-        try
-        {
-            await _next(context);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An unhandled exception occurred while processing the request");
-            await HandleExceptionAsync(context, ex);
-        }
-    }
-
-    private async Task HandleExceptionAsync(HttpContext context, Exception exception)
-    {
-        context.Response.ContentType = "application/json";
-
-        var problemDetails = exception switch
-        {
-            ArgumentException argEx => new ProblemDetails
-            {
-                Title = "Invalid argument",
-                Detail = argEx.Message,
-                Status = StatusCodes.Status400BadRequest
-            },
-            InvalidOperationException invalidOpEx => new ProblemDetails
-            {
-                Title = "Invalid operation",
-                Detail = invalidOpEx.Message,
-                Status = StatusCodes.Status409Conflict
-            },
-            UnauthorizedAccessException => new ProblemDetails
-            {
-                Title = "Unauthorized",
-                Detail = "You are not authorized to access this resource",
-                Status = StatusCodes.Status401Unauthorized
-            },
-            _ => new ProblemDetails
-            {
-                Title = "An error occurred",
-                Detail = _environment.IsDevelopment() ? exception.Message : "An unexpected error occurred",
-                Status = StatusCodes.Status500InternalServerError
-            }
-        };
-
-        problemDetails.Instance = context.Request.Path;
-        problemDetails.Extensions.Add("traceId", context.TraceIdentifier);
-
-        if (_environment.IsDevelopment() && exception is not ArgumentException)
-        {
-            problemDetails.Extensions.Add("stackTrace", exception.StackTrace);
-        }
-
-        context.Response.StatusCode = problemDetails.Status ?? StatusCodes.Status500InternalServerError;
-        
-        var json = JsonSerializer.Serialize(problemDetails, new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-        });
-
-        await context.Response.WriteAsync(json);
-    }
-}
-
-// Register in Program.cs
-app.UseMiddleware<GlobalExceptionMiddleware>();
-```
-
-## Data Access and Entity Framework
-
-### Entity Configuration
-
-Use explicit configuration over conventions for clarity and maintainability:
-
-```csharp
-public class PaymentConfiguration : IEntityTypeConfiguration<Payment>
-{
-    public void Configure(EntityTypeBuilder<Payment> builder)
-    {
-        builder.ToTable("payments");
-
-        builder.HasKey(p => p.Id);
-        
-        builder.Property(p => p.Id)
-            .HasConversion(
-                id => id.Value,
-                value => new PaymentId(value))
-            .ValueGeneratedNever();
-
-        builder.Property(p => p.Amount)
-            .HasColumnType("decimal(18,2)")
-            .IsRequired();
-
-        builder.Property(p => p.Currency)
-            .HasMaxLength(3)
-            .IsRequired();
-
-        builder.Property(p => p.Status)
-            .HasConversion<string>()
-            .HasMaxLength(20)
-            .IsRequired();
-
-        builder.Property(p => p.CreatedAt)
-            .IsRequired();
-
-        builder.Property(p => p.ProcessedAt)
-            .IsRequired(false);
-
-        builder.Property(p => p.Description)
-            .HasMaxLength(500)
-            .IsRequired(false);
-
-        builder.Property(p => p.Metadata)
-            .HasConversion(
-                metadata => metadata != null ? JsonSerializer.Serialize(metadata, (JsonSerializerOptions?)null) : null,
-                json => json != null ? JsonSerializer.Deserialize<Dictionary<string, object>>(json, (JsonSerializerOptions?)null) : null)
-            .HasColumnType("jsonb")
-            .IsRequired(false);
-
-        builder.Property(p => p.CustomerId)
-            .HasConversion(
-                id => id.Value,
-                value => new CustomerId(value))
-            .IsRequired();
-
-        builder.Property(p => p.CardId)
-            .HasMaxLength(50)
-            .IsRequired();
-
-        // Indexes
-        builder.HasIndex(p => p.Status);
-        builder.HasIndex(p => p.CustomerId);
-        builder.HasIndex(p => p.CreatedAt);
-        builder.HasIndex(p => new { p.CustomerId, p.CreatedAt });
-    }
-}
-
-public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
-{
-    public void Configure(EntityTypeBuilder<Customer> builder)
-    {
-        builder.ToTable("customers");
-
-        builder.HasKey(c => c.Id);
-
-        builder.Property(c => c.Id)
-            .HasConversion(
-                id => id.Value,
-                value => new CustomerId(value))
-            .ValueGeneratedNever();
-
-        builder.Property(c => c.Email)
-            .HasMaxLength(320)
-            .IsRequired();
-
-        builder.Property(c => c.FirstName)
-            .HasMaxLength(100)
-            .IsRequired();
-
-        builder.Property(c => c.LastName)
-            .HasMaxLength(100)
-            .IsRequired();
-
-        builder.OwnsOne(c => c.Address, addressBuilder =>
-        {
-            addressBuilder.Property(a => a.HouseNumber)
-                .HasColumnName("address_house_number")
-                .HasMaxLength(20)
-                .IsRequired();
-
-            addressBuilder.Property(a => a.HouseName)
-                .HasColumnName("address_house_name")
-                .HasMaxLength(100)
-                .IsRequired(false);
-
-            addressBuilder.Property(a => a.AddressLine1)
-                .HasColumnName("address_line_1")
-                .HasMaxLength(200)
-                .IsRequired();
-
-            addressBuilder.Property(a => a.AddressLine2)
-                .HasColumnName("address_line_2")
-                .HasMaxLength(200)
-                .IsRequired(false);
-
-            addressBuilder.Property(a => a.City)
-                .HasColumnName("address_city")
-                .HasMaxLength(100)
-                .IsRequired();
-
-            addressBuilder.Property(a => a.Postcode)
-                .HasColumnName("address_postcode")
-                .HasMaxLength(20)
-                .IsRequired();
-        });
-
-        builder.Property(c => c.CreatedAt)
-            .IsRequired();
-
-        builder.Property(c => c.UpdatedAt)
-            .IsRequired();
-
-        // Indexes
-        builder.HasIndex(c => c.Email)
-            .IsUnique();
-        builder.HasIndex(c => c.CreatedAt);
-    }
-}
-```
-
-### DbContext Configuration
-
-```csharp
-public class PaymentDbContext : DbContext
-{
-    public PaymentDbContext(DbContextOptions<PaymentDbContext> options) : base(options)
-    {
-    }
-
-    public DbSet<Payment> Payments => Set<Payment>();
-    public DbSet<Customer> Customers => Set<Customer>();
-
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
-    {
-        base.OnModelCreating(modelBuilder);
-
-        // Apply all configurations in the assembly
-        modelBuilder.ApplyConfigurationsFromAssembly(typeof(PaymentDbContext).Assembly);
-
-        // Global query filters
-        modelBuilder.Entity<Payment>()
-            .HasQueryFilter(p => !p.IsDeleted);
-
-        modelBuilder.Entity<Customer>()
-            .HasQueryFilter(c => !c.IsDeleted);
-    }
-
-    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-    {
-        if (!optionsBuilder.IsConfigured)
-        {
-            // This should only be used for design-time operations
-            optionsBuilder.UseNpgsql("Host=localhost;Database=payments_dev;Username=dev;Password=dev");
-        }
-
-        // Enable sensitive data logging only in development
-        optionsBuilder.EnableSensitiveDataLogging(false);
-        optionsBuilder.EnableDetailedErrors(true);
-    }
-
-    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
-    {
-        // Automatically set audit fields
-        var entries = ChangeTracker.Entries()
-            .Where(e => e.Entity is IAuditable && e.State is EntityState.Added or EntityState.Modified);
-
-        foreach (var entry in entries)
-        {
-            var auditable = (IAuditable)entry.Entity;
-            
-            if (entry.State == EntityState.Added)
-            {
-                auditable.CreatedAt = DateTime.UtcNow;
-            }
-            
-            auditable.UpdatedAt = DateTime.UtcNow;
-        }
-
-        return await base.SaveChangesAsync(cancellationToken);
-    }
-}
-```
-
-### Repository Pattern
-
-Implement repository pattern for complex queries and data access abstraction:
-
-```csharp
-public interface IPaymentRepository
-{
-    Task<Payment?> GetByIdAsync(PaymentId id, CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<Payment>> GetByCustomerIdAsync(CustomerId customerId, CancellationToken cancellationToken = default);
-    Task<PagedResult<Payment>> GetPagedAsync(int page, int pageSize, PaymentStatus? status = null, 
-        DateTime? fromDate = null, DateTime? toDate = null, CancellationToken cancellationToken = default);
-    Task AddAsync(Payment payment, CancellationToken cancellationToken = default);
-    Task UpdateAsync(Payment payment, CancellationToken cancellationToken = default);
-    Task DeleteAsync(PaymentId id, CancellationToken cancellationToken = default);
-    Task<bool> ExistsAsync(PaymentId id, CancellationToken cancellationToken = default);
-    Task<decimal> GetTotalAmountByCustomerAsync(CustomerId customerId, DateTime fromDate, DateTime toDate, 
-        CancellationToken cancellationToken = default);
-}
-
-public class PaymentRepository : IPaymentRepository
-{
-    private readonly PaymentDbContext _context;
-    private readonly ILogger<PaymentRepository> _logger;
-
-    public PaymentRepository(PaymentDbContext context, ILogger<PaymentRepository> logger)
-    {
-        _context = context ?? throw new ArgumentNullException(nameof(context));
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-    }
-
-    public async Task<Payment?> GetByIdAsync(PaymentId id, CancellationToken cancellationToken = default)
-    {
-        return await _context.Payments
-            .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
-    }
-
-    public async Task<IReadOnlyList<Payment>> GetByCustomerIdAsync(CustomerId customerId, CancellationToken cancellationToken = default)
-    {
-        return await _context.Payments
-            .Where(p => p.CustomerId == customerId)
-            .OrderByDescending(p => p.CreatedAt)
-            .ToListAsync(cancellationToken);
-    }
-
-    public async Task<PagedResult<Payment>> GetPagedAsync(
-        int page, 
-        int pageSize, 
-        PaymentStatus? status = null,
-        DateTime? fromDate = null, 
-        DateTime? toDate = null, 
-        CancellationToken cancellationToken = default)
-    {
-        var query = _context.Payments.AsQueryable();
-
-        if (status.HasValue)
-        {
-            query = query.Where(p => p.Status == status.Value);
-        }
-
-        if (fromDate.HasValue)
-        {
-            query = query.Where(p => p.CreatedAt >= fromDate.Value);
-        }
-
-        if (toDate.HasValue)
-        {
-            query = query.Where(p => p.CreatedAt <= toDate.Value);
-        }
-
-        var totalCount = await query.CountAsync(cancellationToken);
-        
-        var payments = await query
-            .OrderByDescending(p => p.CreatedAt)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync(cancellationToken);
-
-        return new PagedResult<Payment>
-        {
-            Data = payments,
-            Page = page,
-            PageSize = pageSize,
-            TotalCount = totalCount,
-            TotalPages = (int)Math.Ceiling((double)totalCount / pageSize)
-        };
-    }
-
-    public async Task AddAsync(Payment payment, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(payment);
-        
-        _context.Payments.Add(payment);
-        await _context.SaveChangesAsync(cancellationToken);
-        
-        _logger.LogInformation("Payment {PaymentId} added successfully", payment.Id);
-    }
-
-    public async Task UpdateAsync(Payment payment, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(payment);
-        
-        _context.Payments.Update(payment);
-        await _context.SaveChangesAsync(cancellationToken);
-        
-        _logger.LogInformation("Payment {PaymentId} updated successfully", payment.Id);
-    }
-
-    public async Task DeleteAsync(PaymentId id, CancellationToken cancellationToken = default)
-    {
-        var payment = await GetByIdAsync(id, cancellationToken);
-        if (payment is not null)
-        {
-            payment.MarkAsDeleted();
-            await UpdateAsync(payment, cancellationToken);
-            
-            _logger.LogInformation("Payment {PaymentId} marked as deleted", id);
-        }
-    }
-
-    public async Task<bool> ExistsAsync(PaymentId id, CancellationToken cancellationToken = default)
-    {
-        return await _context.Payments
-            .AnyAsync(p => p.Id == id, cancellationToken);
-    }
-
-    public async Task<decimal> GetTotalAmountByCustomerAsync(
-        CustomerId customerId, 
-        DateTime fromDate, 
-        DateTime toDate,
-        CancellationToken cancellationToken = default)
-    {
-        return await _context.Payments
-            .Where(p => p.CustomerId == customerId)
-            .Where(p => p.CreatedAt >= fromDate && p.CreatedAt <= toDate)
-            .Where(p => p.Status == PaymentStatus.Completed)
-            .SumAsync(p => p.Amount, cancellationToken);
-    }
-}
-```
-
-### Database Migrations and Seeding
-
-```csharp
-// Migration helper for consistent database setup
-public static class DatabaseExtensions
-{
-    public static async Task<WebApplication> MigrateDatabaseAsync(this WebApplication app)
-    {
-        using var scope = app.Services.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<PaymentDbContext>();
-        var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-
-        try
-        {
-            logger.LogInformation("Starting database migration");
-            await context.Database.MigrateAsync();
-            logger.LogInformation("Database migration completed successfully");
-
-            if (app.Environment.IsDevelopment())
-            {
-                await SeedDevelopmentDataAsync(context, logger);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "An error occurred while migrating the database");
-            throw;
-        }
-
-        return app;
-    }
-
-    private static async Task SeedDevelopmentDataAsync(PaymentDbContext context, ILogger logger)
-    {
-        logger.LogInformation("Seeding development data");
-
-        // Check if data already exists
-        if (await context.Customers.AnyAsync())
-        {
-            logger.LogInformation("Development data already exists, skipping seed");
-            return;
-        }
-
-        // Seed customers
-        var customers = new[]
-        {
-            new Customer(
-                CustomerId.New(),
-                "john.doe@example.com",
-                "John",
-                "Doe",
-                new AddressDetails("123", "Test House", "Test Street", null, "London", "SW1A 1AA")),
-            new Customer(
-                CustomerId.New(),
-                "jane.smith@example.com",
-                "Jane",
-                "Smith",
-                new AddressDetails("456", null, "Another Street", "Apt 2", "Manchester", "M1 1AA"))
-        };
-
-        context.Customers.AddRange(customers);
-        await context.SaveChangesAsync();
-
-        // Seed payments
-        var payments = customers.SelectMany(customer => new[]
-        {
-            new Payment(PaymentId.New(), 100m, "GBP", customer.Id, "card_123"),
-            new Payment(PaymentId.New(), 250m, "USD", customer.Id, "card_456"),
-            new Payment(PaymentId.New(), 75m, "EUR", customer.Id, "card_789")
-        }).ToArray();
-
-        context.Payments.AddRange(payments);
-        await context.SaveChangesAsync();
-
-        logger.LogInformation("Development data seeded successfully");
-    }
-}
-
-// Usage in Program.cs
-await app.MigrateDatabaseAsync();
-```
-
-### Unit of Work Pattern (Optional)
-
-```csharp
-public interface IUnitOfWork : IDisposable
-{
-    IPaymentRepository Payments { get; }
-    ICustomerRepository Customers { get; }
-    Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
-    Task BeginTransactionAsync(CancellationToken cancellationToken = default);
-    Task CommitTransactionAsync(CancellationToken cancellationToken = default);
-    Task RollbackTransactionAsync(CancellationToken cancellationToken = default);
-}
-
-public class UnitOfWork : IUnitOfWork
-{
-    private readonly PaymentDbContext _context;
-    private IDbContextTransaction? _transaction;
-
-    public UnitOfWork(PaymentDbContext context)
-    {
-        _context = context ?? throw new ArgumentNullException(nameof(context));
-        Payments = new PaymentRepository(_context, serviceProvider.GetRequiredService<ILogger<PaymentRepository>>());
-        Customers = new CustomerRepository(_context, serviceProvider.GetRequiredService<ILogger<CustomerRepository>>());
-    }
-
-    public IPaymentRepository Payments { get; }
-    public ICustomerRepository Customers { get; }
-
-    public async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
-    {
-        return await _context.SaveChangesAsync(cancellationToken);
-    }
-
-    public async Task BeginTransactionAsync(CancellationToken cancellationToken = default)
-    {
-        _transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
-    }
-
-    public async Task CommitTransactionAsync(CancellationToken cancellationToken = default)
-    {
-        if (_transaction is not null)
-        {
-            await _transaction.CommitAsync(cancellationToken);
-            await _transaction.DisposeAsync();
-            _transaction = null;
-        }
-    }
-
-    public async Task RollbackTransactionAsync(CancellationToken cancellationToken = default)
-    {
-        if (_transaction is not null)
-        {
-            await _transaction.RollbackAsync(cancellationToken);
-            await _transaction.DisposeAsync();
-            _transaction = null;
-        }
-    }
-
-    public void Dispose()
-    {
-        _transaction?.Dispose();
-        _context.Dispose();
-    }
-}
-```
 ## Refactoring - The Critical Third Step
 
 Evaluating refactoring opportunities is not optional - it's the third step in the TDD cycle. After achieving a green state and committing your work, you MUST assess whether the code can be improved. However, only refactor if there's clear value - if the code is already clean and expresses intent well, move on to the next test.
@@ -2374,158 +2088,6 @@ public static class PaymentCardHelper
 }
 ```
 
-### Caching Strategies
-
-Caching is not required in all application use cases, always confirm with the developer before implementing caching.
-
-```csharp
-// Good - Memory caching with proper cache keys and expiration
-public class PaymentService : IPaymentService
-{
-    private readonly IPaymentRepository _paymentRepository;
-    private readonly IMemoryCache _memoryCache;
-    private readonly IDistributedCache _distributedCache;
-    private readonly ILogger<PaymentService> _logger;
-    
-    private static readonly TimeSpan CustomerCacheExpiry = TimeSpan.FromMinutes(15);
-    private static readonly TimeSpan PaymentCacheExpiry = TimeSpan.FromMinutes(5);
-
-    public PaymentService(
-        IPaymentRepository paymentRepository,
-        IMemoryCache memoryCache,
-        IDistributedCache distributedCache,
-        ILogger<PaymentService> logger)
-    {
-        _paymentRepository = paymentRepository;
-        _memoryCache = memoryCache;
-        _distributedCache = distributedCache;
-        _logger = logger;
-       }
-
-    public async Task<Customer?> GetCustomerAsync(CustomerId customerId, CancellationToken cancellationToken = default)
-    {
-        var cacheKey = $"customer:{customerId}";
-        
-        // Try memory cache first
-        if (_memoryCache.TryGetValue(cacheKey, out Customer? cachedCustomer))
-        {
-            _logger.LogDebug("Customer {CustomerId} found in memory cache", customerId);
-            return cachedCustomer;
-        }
-
-        // Try distributed cache
-        var distributedCacheValue = await _distributedCache.GetStringAsync(cacheKey, cancellationToken);
-        if (!string.IsNullOrEmpty(distributedCacheValue))
-        {
-            var customer = JsonSerializer.Deserialize<Customer>(distributedCacheValue);
-            
-            // Add to memory cache for faster future access
-            _memoryCache.Set(cacheKey, customer, CustomerCacheExpiry);
-            
-            _logger.LogDebug("Customer {CustomerId} found in distributed cache", customerId);
-            return customer;
-        }
-
-        // Fetch from repository
-        var customerFromDb = await _customerRepository.GetByIdAsync(customerId, cancellationToken);
-        if (customerFromDb is not null)
-        {
-            // Cache in both memory and distributed cache
-            _memoryCache.Set(cacheKey, customerFromDb, CustomerCacheExpiry);
-            
-            var serializedCustomer = JsonSerializer.Serialize(customerFromDb);
-            await _distributedCache.SetStringAsync(
-                cacheKey, 
-                serializedCustomer, 
-                new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = CustomerCacheExpiry },
-                cancellationToken);
-            
-            _logger.LogDebug("Customer {CustomerId} cached from database", customerId);
-        }
-
-        return customerFromDb;
-    }
-
-    public async Task InvalidateCustomerCacheAsync(CustomerId customerId, CancellationToken cancellationToken = default)
-    {
-        var cacheKey = $"customer:{customerId}";
-        
-        _memoryCache.Remove(cacheKey);
-        await _distributedCache.RemoveAsync(cacheKey, cancellationToken);
-        
-        _logger.LogDebug("Customer {CustomerId} cache invalidated", customerId);
-    }
-}
-
-// Good - Cache-aside pattern with cache warming
-public class PaymentAnalyticsService : IPaymentAnalyticsService
-{
-    private readonly IPaymentRepository _paymentRepository;
-    private readonly IDistributedCache _distributedCache;
-    private readonly ILogger<PaymentAnalyticsService> _logger;
-
-    public async Task<PaymentAnalytics> GetPaymentAnalyticsAsync(
-        CustomerId customerId, 
-        DateOnly date, 
-        CancellationToken cancellationToken = default)
-    {
-        var cacheKey = $"analytics:payments:{customerId}:{date:yyyy-MM-dd}";
-        
-        var cachedAnalytics = await GetFromCacheAsync<PaymentAnalytics>(cacheKey, cancellationToken);
-        if (cachedAnalytics is not null)
-        {
-            return cachedAnalytics;
-        }
-
-        var analytics = await CalculatePaymentAnalyticsAsync(customerId, date, cancellationToken);
-        
-        // Cache for 1 hour, but longer for older dates (they won't change)
-        var expiry = date == DateOnly.FromDateTime(DateTime.UtcNow) 
-            ? TimeSpan.FromHours(1) 
-            : TimeSpan.FromDays(1);
-            
-        await SetCacheAsync(cacheKey, analytics, expiry, cancellationToken);
-        
-        return analytics;
-    }
-
-    private async Task<T?> GetFromCacheAsync<T>(string cacheKey, CancellationToken cancellationToken)
-        where T : class
-    {
-        try
-        {
-            var cachedValue = await _distributedCache.GetStringAsync(cacheKey, cancellationToken);
-            return string.IsNullOrEmpty(cachedValue) 
-                ? null 
-                : JsonSerializer.Deserialize<T>(cachedValue);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to get value from cache for key {CacheKey}", cacheKey);
-            return null;
-        }
-    }
-
-    private async Task SetCacheAsync<T>(string cacheKey, T value, TimeSpan expiry, CancellationToken cancellationToken)
-    {
-        try
-        {
-            var serializedValue = JsonSerializer.Serialize(value);
-            var options = new DistributedCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = expiry
-            };
-            
-            await _distributedCache.SetStringAsync(cacheKey, serializedValue, options, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to set cache for key {CacheKey}", cacheKey);
-        }
-    }
-}
-```
-
 ## Security Best Practices
 
 ### Input Validation and Sanitization
@@ -2563,228 +2125,6 @@ public class CreateCustomerRequestValidator : AbstractValidator<CreateCustomerRe
             .LessThan(DateTime.UtcNow.AddYears(-18))
             .GreaterThan(DateTime.UtcNow.AddYears(-120))
             .WithMessage("Customer must be between 18 and 120 years old");
-    }
-}
-
-// Good - SQL injection prevention with parameterized queries
-public class PaymentRepository : IPaymentRepository
-{
-    private readonly PaymentDbContext _context;
-
-    // Entity Framework automatically parameterizes queries
-    public async Task<IReadOnlyList<Payment>> SearchPaymentsAsync(
-        string? cardNumberLast4, 
-        string? customerEmail,
-        CancellationToken cancellationToken = default)
-    {
-        var query = _context.Payments.AsQueryable();
-
-        if (!string.IsNullOrEmpty(cardNumberLast4))
-        {
-            // EF Core automatically parameterizes this
-            query = query.Where(p => p.CardNumber.EndsWith(cardNumberLast4));
-        }
-
-        if (!string.IsNullOrEmpty(customerEmail))
-        {
-            query = query.Where(p => p.Customer.Email == customerEmail);
-        }
-
-        return await query.ToListAsync(cancellationToken);
-    }
-
-    // When using raw SQL, always use parameters
-    public async Task<decimal> GetTotalRevenueAsync(DateTime startDate, DateTime endDate, CancellationToken cancellationToken = default)
-    {
-        return await _context.Database
-            .SqlQuery<decimal>($"SELECT SUM(amount) FROM payments WHERE created_at BETWEEN {startDate} AND {endDate} AND status = 'Completed'")
-            .FirstOrDefaultAsync(cancellationToken);
-    }
-}
-
-// Good - XSS prevention with proper encoding
-public class PaymentReportService : IPaymentReportService
-{
-    public async Task<string> GenerateHtmlReportAsync(IReadOnlyList<Payment> payments)
-    {
-        var html = new StringBuilder();
-        html.AppendLine("<html><body>");
-        html.AppendLine("<h1>Payment Report</h1>");
-        html.AppendLine("<table>");
-        html.AppendLine("<tr><th>ID</th><th>Amount</th><th>Customer</th><th>Status</th></tr>");
-
-        foreach (var payment in payments)
-        {
-            html.AppendLine("<tr>");
-            html.AppendLine($"<td>{HtmlEncoder.Default.Encode(payment.Id.ToString())}</td>");
-            html.AppendLine($"<td>{HtmlEncoder.Default.Encode(payment.Amount.ToString("C"))}</td>");
-            html.AppendLine($"<td>{HtmlEncoder.Default.Encode(payment.Customer.Email)}</td>");
-            html.AppendLine($"<td>{HtmlEncoder.Default.Encode(payment.Status.ToString())}</td>");
-            html.AppendLine("</tr>");
-        }
-
-        html.AppendLine("</table>");
-        html.AppendLine("</body></html>");
-
-        return html.ToString();
-    }
-}
-```
-
-### Authentication and Authorization
-
-```csharp
-// Good - JWT authentication configuration
-public static class AuthenticationExtensions
-{
-    public static IServiceCollection AddJwtAuthentication(
-        this IServiceCollection services,
-        IConfiguration configuration)
-    {
-        var jwtSettings = configuration.GetSection("Jwt").Get<JwtSettings>()
-            ?? throw new InvalidOperationException("JWT settings not found");
-
-        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddJwtBearer(options =>
-            {
-                options.TokenValidationParameters = new TokenValidationParameters
-                {
-                    ValidateIssuer = true,
-                    ValidateAudience = true,
-                    ValidateLifetime = true,
-                    ValidateIssuerSigningKey = true,
-                    ValidIssuer = jwtSettings.Issuer,
-                    ValidAudience = jwtSettings.Audience,
-                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSettings.SecretKey)),
-                    ClockSkew = TimeSpan.FromMinutes(5)
-                };
-
-                options.Events = new JwtBearerEvents
-                {
-                    OnAuthenticationFailed = context =>
-                    {
-                        var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
-                        logger.LogWarning("Authentication failed: {Error}", context.Exception.Message);
-                        return Task.CompletedTask;
-                    },
-                    OnTokenValidated = context =>
-                    {
-                        var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
-                        logger.LogDebug("Token validated for user: {UserId}", context.Principal?.Identity?.Name);
-                        return Task.CompletedTask;
-                    }
-                };
-            });
-
-        return services;
-    }
-}
-
-// Good - Custom authorization policies
-public static class AuthorizationExtensions
-{
-    public static IServiceCollection AddCustomAuthorization(this IServiceCollection services)
-    {
-        services.AddAuthorization(options =>
-        {
-            options.AddPolicy("RequireAdminRole", policy =>
-                policy.RequireRole("Admin"));
-
-            options.AddPolicy("RequireManagerOrAdmin", policy =>
-                policy.RequireRole("Manager", "Admin"));
-
-            options.AddPolicy("RequirePaymentAccess", policy =>
-                policy.RequireAssertion(context =>
-                    context.User.HasClaim("permission", "payments:read") ||
-                    context.User.IsInRole("Admin")));
-
-            options.AddPolicy("RequireResourceOwnership", policy =>
-                policy.Requirements.Add(new ResourceOwnershipRequirement()));
-        });
-
-        services.AddScoped<IAuthorizationHandler, ResourceOwnershipHandler>();
-        return services;
-    }
-}
-
-public class ResourceOwnershipRequirement : IAuthorizationRequirement { }
-
-public class ResourceOwnershipHandler : AuthorizationHandler<ResourceOwnershipRequirement>
-{
-    private readonly IHttpContextAccessor _httpContextAccessor;
-
-    public ResourceOwnershipHandler(IHttpContextAccessor httpContextAccessor)
-    {
-        _httpContextAccessor = httpContextAccessor;
-    }
-
-    protected override Task HandleRequirementAsync(
-        AuthorizationHandlerContext context,
-        ResourceOwnershipRequirement requirement)
-    {
-        var httpContext = _httpContextAccessor.HttpContext;
-        if (httpContext is null)
-        {
-            context.Fail();
-            return Task.CompletedTask;
-        }
-
-        var userIdClaim = context.User.FindFirst("sub")?.Value;
-        var resourceUserId = httpContext.Request.RouteValues["userId"]?.ToString();
-
-        if (userIdClaim == resourceUserId || context.User.IsInRole("Admin"))
-        {
-            context.Succeed(requirement);
-        }
-        else
-        {
-            context.Fail();
-        }
-
-        return Task.CompletedTask;
-    }
-}
-
-// Good - Secure controller with proper authorization
-[ApiController]
-[Route("api/[controller]")]
-[Authorize]
-public class PaymentsController : ControllerBase
-{
-    [HttpGet]
-    [Authorize(Policy = "RequirePaymentAccess")]
-    public async Task<ActionResult<PagedResponse<PaymentResponse>>> GetPayments(
-        [FromQuery] GetPaymentsRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        // Implementation...
-    }
-
-    [HttpGet("{id:guid}")]
-    [Authorize(Policy = "RequireResourceOwnership")]
-    public async Task<ActionResult<PaymentResponse>> GetPayment(
-        [FromRoute] Guid id,
-        CancellationToken cancellationToken = default)
-    {
-        // Implementation...
-    }
-
-    [HttpPost]
-    [Authorize(Roles = "User,Manager,Admin")]
-    public async Task<ActionResult<PaymentResponse>> CreatePayment(
-        [FromBody] CreatePaymentRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        // Implementation...
-    }
-
-    [HttpDelete("{id:guid}")]
-    [Authorize(Roles = "Admin")]
-    public async Task<IActionResult> DeletePayment(
-        [FromRoute] Guid id,
-        CancellationToken cancellationToken = default)
-    {
-        // Implementation...
     }
 }
 ```
@@ -2914,45 +2254,45 @@ public class PasswordService : IPasswordService
 
 ### Structured Logging
 
+Use [Lambda Powertools for structured logging](https://docs.powertools.aws.dev/lambda/dotnet/getting-started/logger/simple/).
+
 ```csharp
+using AWS.Lambda.Powertools.Logging;
+
 // Good - Structured logging with correlation IDs and context
 public class PaymentService : IPaymentService
 {
     private readonly IPaymentRepository _paymentRepository;
-    private readonly ILogger<PaymentService> _logger;
 
     public async Task<Result<Payment>> ProcessPaymentAsync(
         PaymentRequest request, 
         CancellationToken cancellationToken = default)
     {
-        using var scope = _logger.BeginScope(new Dictionary<string, object>
-        {
-            ["PaymentId"] = PaymentId.New(),
-            ["CustomerId"] = request.CustomerId,
-            ["Amount"] = request.Amount,
-            ["Currency"] = request.Currency
-        });
+        Logger.AppendKey("PaymentId", PaymentId.New());
+        Logger.AppendKey("PaymentId", request.CustomerId);
+        Logger.AppendKey("PaymentId", request.Amount);
+        Logger.AppendKey("PaymentId", request.Currency);
 
-        _logger.LogInformation("Starting payment processing");
+        Logger.LogInformation("Starting payment processing");
 
         try
         {
             var validationResult = await ValidatePaymentAsync(request, cancellationToken);
             if (!validationResult.IsValid)
             {
-                _logger.LogWarning("Payment validation failed: {ValidationErrors}", 
+                Logger.LogWarning("Payment validation failed: {ValidationErrors}", 
                     string.Join(", ", validationResult.Errors));
                 return Result<Payment>.Failure("Validation failed");
             }
 
             var payment = await CreatePaymentAsync(request, cancellationToken);
             
-            _logger.LogInformation("Payment {PaymentId} processed successfully", payment.Id);
+            Logger.LogInformation("Payment {PaymentId} processed successfully", payment.Id);
             return Result<Payment>.Success(payment);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Payment processing failed");
+            Logger.LogError(ex, "Payment processing failed");
             return Result<Payment>.Failure("Payment processing failed");
         }
     }
@@ -3002,262 +2342,6 @@ public class PaymentGatewayService : IPaymentGatewayService
             activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             _logger.LogError(ex, "Payment authorization failed");
             throw;
-        }
-    }
-}
-```
-
-### Health Checks
-
-```csharp
-// Good - Comprehensive health checks
-public static class HealthCheckExtensions
-{
-    public static IServiceCollection AddCustomHealthChecks(
-        this IServiceCollection services,
-        IConfiguration configuration)
-    {
-        services.AddHealthChecks()
-            .AddDbContextCheck<PaymentDbContext>("database")
-            .AddRedis(configuration.GetConnectionString("Redis")!, "redis")
-            .AddRabbitMQ(rabbitConnectionString: configuration.GetConnectionString("RabbitMQ")!, name: "rabbitmq")
-            .AddUrlGroup(new Uri($"{configuration["PaymentGateway:BaseUrl"]}/health"), "payment-gateway")
-            .AddCheck<PaymentServiceHealthCheck>("payment-service")
-            .AddCheck<FileSystemHealthCheck>("filesystem");
-
-        return services;
-    }
-}
-
-public class PaymentServiceHealthCheck : IHealthCheck
-{
-    private readonly IPaymentRepository _paymentRepository;
-    private readonly ILogger<PaymentServiceHealthCheck> _logger;
-
-    public PaymentServiceHealthCheck(
-        IPaymentRepository paymentRepository,
-        ILogger<PaymentServiceHealthCheck> logger)
-    {
-        _paymentRepository = paymentRepository;
-        _logger = logger;
-    }
-
-    public async Task<HealthCheckResult> CheckHealthAsync(
-        HealthCheckContext context,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            // Test database connectivity by checking if we can count payments
-            var canConnectToDatabase = await TestDatabaseConnectionAsync(cancellationToken);
-            if (!canConnectToDatabase)
-            {
-                return HealthCheckResult.Unhealthy("Cannot connect to payment database");
-            }
-
-            // Test critical business functionality
-            var canProcessPayments = await TestPaymentProcessingAsync(cancellationToken);
-            if (!canProcessPayments)
-            {
-                return HealthCheckResult.Degraded("Payment processing may be impaired");
-            }
-
-            return HealthCheckResult.Healthy("Payment service is healthy");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Health check failed");
-            return HealthCheckResult.Unhealthy("Payment service health check failed", ex);
-        }
-    }
-
-    private async Task<bool> TestDatabaseConnectionAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            // Simple query to test database connectivity
-            var recentPayments = await _paymentRepository.GetPagedAsync(1, 1, cancellationToken: cancellationToken);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private async Task<bool> TestPaymentProcessingAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            // Test payment validation logic without hitting external services
-            var testRequest = new PaymentRequestBuilder()
-                .WithAmount(100m)
-                .WithCurrency("GBP")
-                .Build();
-
-            var validator = new PaymentRequestValidator();
-            var validationResult = await validator.ValidateAsync(testRequest, cancellationToken);
-            
-            return validationResult.IsValid;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-}
-
-public class FileSystemHealthCheck : IHealthCheck
-{
-    private readonly IWebHostEnvironment _environment;
-
-    public FileSystemHealthCheck(IWebHostEnvironment environment)
-    {
-        _environment = environment;
-    }
-
-    public Task<HealthCheckResult> CheckHealthAsync(
-        HealthCheckContext context,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            var tempPath = Path.Combine(_environment.ContentRootPath, "temp");
-            
-            // Ensure temp directory exists
-            Directory.CreateDirectory(tempPath);
-            
-            // Test write permissions
-            var testFile = Path.Combine(tempPath, $"healthcheck_{Guid.NewGuid()}.tmp");
-            File.WriteAllText(testFile, "health check test");
-            
-            // Test read permissions
-            var content = File.ReadAllText(testFile);
-            
-            // Cleanup
-            File.Delete(testFile);
-            
-            return Task.FromResult(HealthCheckResult.Healthy("File system is accessible"));
-        }
-        catch (Exception ex)
-        {
-            return Task.FromResult(HealthCheckResult.Unhealthy("File system access failed", ex));
-        }
-    }
-}
-
-// Register health checks in Program.cs
-app.MapHealthChecks("/health", new HealthCheckOptions
-{
-    ResponseWriter = async (context, report) =>
-    {
-        context.Response.ContentType = "application/json";
-        
-        var result = JsonSerializer.Serialize(new
-        {
-            status = report.Status.ToString(),
-            checks = report.Entries.Select(e => new
-            {
-                name = e.Key,
-                status = e.Value.Status.ToString(),
-                exception = e.Value.Exception?.Message,
-                duration = e.Value.Duration.ToString()
-            })
-        });
-        
-        await context.Response.WriteAsync(result);
-    }
-});
-
-app.MapHealthChecks("/health/ready", new HealthCheckOptions
-{
-    Predicate = check => check.Tags.Contains("ready")
-});
-
-app.MapHealthChecks("/health/live", new HealthCheckOptions
-{
-    Predicate = _ => false
-});
-```
-
-### Metrics and Telemetry
-
-```csharp
-// Good - Custom metrics for business operations
-public class PaymentMetrics
-{
-    private readonly Counter<int> _paymentsProcessed;
-    private readonly Counter<int> _paymentsFailed;
-    private readonly Histogram<double> _paymentProcessingTime;
-    private readonly Histogram<double> _paymentAmount;
-
-    public PaymentMetrics(IMeterFactory meterFactory)
-    {
-        var meter = meterFactory.Create("PaymentService");
-        
-        _paymentsProcessed = meter.CreateCounter<int>(
-            "payments_processed_total",
-            "Total number of payments processed");
-            
-        _paymentsFailed = meter.CreateCounter<int>(
-            "payments_failed_total", 
-            "Total number of failed payments");
-            
-        _paymentProcessingTime = meter.CreateHistogram<double>(
-            "payment_processing_duration_seconds",
-            "Payment processing duration in seconds");
-            
-        _paymentAmount = meter.CreateHistogram<double>(
-            "payment_amount",
-            "Payment amounts");
-    }
-
-    public void RecordPaymentProcessed(string currency, string status, double processingTimeSeconds, double amount)
-    {
-        _paymentsProcessed.Add(1, new KeyValuePair<string, object?>("currency", currency), 
-                                  new KeyValuePair<string, object?>("status", status));
-        _paymentProcessingTime.Record(processingTimeSeconds);
-        _paymentAmount.Record(amount, new KeyValuePair<string, object?>("currency", currency));
-    }
-
-    public void RecordPaymentFailed(string currency, string errorType)
-    {
-        _paymentsFailed.Add(1, new KeyValuePair<string, object?>("currency", currency),
-                               new KeyValuePair<string, object?>("error_type", errorType));
-    }
-}
-
-public class PaymentService : IPaymentService
-{
-    private readonly PaymentMetrics _metrics;
-    private readonly ILogger<PaymentService> _logger;
-
-    public async Task<Result<Payment>> ProcessPaymentAsync(
-        PaymentRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        var stopwatch = Stopwatch.StartNew();
-        
-        try
-        {
-            var payment = await ProcessPaymentInternalAsync(request, cancellationToken);
-            
-            stopwatch.Stop();
-            _metrics.RecordPaymentProcessed(
-                request.Currency,
-                "success",
-                stopwatch.Elapsed.TotalSeconds,
-                (double)request.Amount);
-                
-            return Result<Payment>.Success(payment);
-        }
-        catch (Exception ex)
-        {
-            stopwatch.Stop();
-            _metrics.RecordPaymentFailed(request.Currency, ex.GetType().Name);
-            
-            _logger.LogError(ex, "Payment processing failed");
-            return Result<Payment>.Failure("Payment processing failed");
         }
     }
 }

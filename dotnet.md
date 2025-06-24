@@ -227,6 +227,8 @@ Key principles:
 
 ### Project Structure
 
+### Project Structure
+
 ```
 src/
   YourApp.Api/              # Web API project
@@ -237,6 +239,8 @@ tests/
   YourApp.Api.Tests/        # API integration tests
   YourApp.Application.Tests/ # Core layer tests
 ```
+
+Inside the .Core library, DO NOT create folders based on technical feature (Entities, DTO's, Services). Instead, create folders based on the actual business value that grouped set of code performs. Loosely following a vertical slice architecture style. A new developer should be able to look at the files/folders inside a project and understand what is is that the application does.
 
 ### C# Language Features
 
