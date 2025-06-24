@@ -21,7 +21,7 @@ I follow Test-Driven Development (TDD) with a strong emphasis on behavior-driven
 **Preferred Tools:**
 
 - **Language**: C# 12+ (.NET 9)
-- **Testing**: xUnit + FluentAssertions + Testcontainers
+- **Testing**: xUnit + FluentAssertions no higher than version 7 + Testcontainers
 - **State Management**: Prefer immutable patterns and records
 - **Validation**: FluentValidation
 - **Serialization**: System.Text.Json
@@ -32,9 +32,8 @@ I follow Test-Driven Development (TDD) with a strong emphasis on behavior-driven
 
 - **No "unit tests"** - this term is not helpful. Tests should verify expected behavior, treating implementation as a black box
 - Test through the public API exclusively - internals should be invisible to tests
-- No 1:1 mapping between test files and implementation files
+- Create tests in a separate project directory underneath the `tests` directory
 - Tests that examine internal implementation details are wasteful and should be avoided
-- **Coverage targets**: 100% coverage should be expected at all times, but these tests must ALWAYS be based on business behaviour, not implementation details
 - Tests must document expected business behaviour
 
 ### Testing Tools
@@ -50,11 +49,13 @@ I follow Test-Driven Development (TDD) with a strong emphasis on behavior-driven
 
 ```
 src/
-  Features/
-    Payment/
-      PaymentProcessor.cs
-      PaymentValidator.cs
-      PaymentProcessor.Tests.cs // The validator is an implementation detail. Validation is fully covered, but by testing the expected business behaviour
+  PaymentProcessorApplication/
+    PaymentProcessorApplication.csproj
+    PaymentProcessor.cs
+    PaymentValidator.cs
+tests/
+  PaymentProcessorApplication.Tests/
+    PaymentProcessor.Tests.cs // The validator is an implementation detail. Validation is fully covered, but by testing the expected business behaviour
 ```
 
 ### Test Data Pattern
@@ -229,15 +230,12 @@ Key principles:
 ```
 src/
   YourApp.Api/              # Web API project
-  YourApp.Application/      # Application layer (use cases, services)
-  YourApp.Domain/           # Domain models, entities, value objects
-  YourApp.Infrastructure/   # Data access, external services
-  YourApp.Contracts/        # DTOs, requests, responses
+  YourApp.Core/             # Application layer (use cases, services), Domain models, entities, value objects, DTOs, requests, responses
+  YourApp.Adapters/         # Data access, external services
+  YourApp.BackgroundWorkers/         # This project is only required if the service performs asynchronous work. It is seperate to run any background workers independently from a synchronous API
 tests/
   YourApp.Api.Tests/        # API integration tests
-  YourApp.Application.Tests/ # Application layer tests
-  YourApp.Domain.Tests/     # Domain logic tests
-  YourApp.Infrastructure.Tests/ # Infrastructure tests
+  YourApp.Application.Tests/ # Core layer tests
 ```
 
 ### C# Language Features
@@ -559,77 +557,6 @@ public async Task ProcessPayment_ShouldFailValidation_WhenAmountIsNegative()
 ```
 
 ## Code Style
-
-### Functional Programming
-
-Follow a "functional light" approach:
-
-- **No data mutation** - work with immutable data structures
-- **Pure functions** wherever possible
-- **Composition** as the primary mechanism for code reuse
-- Avoid heavy FP abstractions unless there's clear advantage
-- Use LINQ methods over imperative loops
-
-#### Examples of Functional Patterns
-
-```csharp
-// Good - Pure function with immutable updates
-public static Order ApplyDiscount(Order order, decimal discountPercent)
-{
-    var discountMultiplier = (100 - discountPercent) / 100;
-    
-    var discountedItems = order.Items
-        .Select(item => item with { Price = item.Price * discountMultiplier })
-        .ToList();
-
-    var newTotalPrice = discountedItems.Sum(item => item.Price);
-
-    return order with 
-    { 
-        Items = discountedItems,
-        TotalPrice = newTotalPrice
-    };
-}
-
-// Good - Composition over complex logic
-public static ProcessedOrder ProcessOrder(Order order)
-{
-    return order
-        .Pipe(ValidateOrder)
-        .Pipe(ApplyPromotions)
-        .Pipe(CalculateTax)
-        .Pipe(AssignWarehouse);
-}
-
-// Extension method for pipeline
-public static class FunctionalExtensions
-{
-    public static TResult Pipe<T, TResult>(this T input, Func<T, TResult> function)
-    {
-        return function(input);
-    }
-}
-
-// Good - LINQ over imperative loops
-public static decimal CalculateOrderTotal(IEnumerable<OrderItem> items)
-{
-    return items
-        .Where(item => item.IsActive)
-        .Sum(item => item.Price * item.Quantity);
-}
-
-// Good - Immutable updates with records
-public static PaymentStatus UpdatePaymentStatus(PaymentStatus current, PaymentEvent paymentEvent)
-{
-    return paymentEvent switch
-    {
-        PaymentAuthorized => current with { Status = "Authorized", AuthorizedAt = DateTime.UtcNow },
-        PaymentCaptured => current with { Status = "Captured", CapturedAt = DateTime.UtcNow },
-        PaymentFailed failure => current with { Status = "Failed", FailureReason = failure.Reason },
-        _ => current
-    };
-}
-```
 
 ### Code Structure
 
@@ -2448,6 +2375,8 @@ public static class PaymentCardHelper
 ```
 
 ### Caching Strategies
+
+Caching is not required in all application use cases, always confirm with the developer before implementing caching.
 
 ```csharp
 // Good - Memory caching with proper cache keys and expiration
