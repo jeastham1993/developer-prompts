@@ -2,7 +2,7 @@
 
 ## Application Features
 
-<ADD THE DESCRIPTION OF WHAT YOUR APPLICATION SHOULD DO HERE>
+This is an application that is going to take a request from the user, that contains a name and email address and simply store that in the database.
 
 ## Core Philosophy
 
@@ -21,12 +21,12 @@ I also follow 'serverless-first' thinking, choosing AWS serverless technologies 
 - Nullable reference types enabled
 - Immutable data only
 - Small, pure functions
-- C# 12+ features and .NET 9
+- C# 12+ features and .NET 8
 - Use real models/DTOs in tests, never redefine them
 
 **Preferred Tools:**
 
-- **Language**: C# 12+ (.NET 9)
+- **Language**: C# 12+ (.NET 8)
 - **Testing**: xUnit + FluentAssertions no higher than version 7 + Testcontainers
 - **State Management**: Prefer immutable patterns and records
 - **Validation**: FluentValidation
@@ -159,19 +159,27 @@ public class PaymentService : IPaymentService
 - Use Native AOT compilation for faster cold starts and better performance
 - Ensure all dependencies support AOT compilation
 - Test thoroughly with AOT-specific constraints
+- Here is an example of how to configure native AOT with Lambda
+- When building single purpose Lambda functions the Amazon.Lambda.AspNetCoreServer.Hosting is not required
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <OutputType>exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <AWSProjectType>Lambda</AWSProjectType>
+    <AssemblyName>bootstrap</AssemblyName>
+    <PublishReadyToRunComposite>true</PublishReadyToRunComposite>
+    <EventSourceSupport>false</EventSourceSupport>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
     <PublishAot>true</PublishAot>
-    <StripSymbols>true</StripSymbols>
-    <TrimMode>full</TrimMode>
   </PropertyGroup>
   
   <ItemGroup>
     <PackageReference Include="Amazon.Lambda.Annotations" Version="1.5.0" />
-    <PackageReference Include="Amazon.Lambda.AspNetCoreServer.Hosting" Version="1.7.0" />
   </ItemGroup>
 </Project>
 ```
