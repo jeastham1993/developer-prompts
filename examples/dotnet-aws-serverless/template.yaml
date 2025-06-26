@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Contact Manager Serverless Application
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: dotnet8
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        CONTACTS_TABLE_NAME: !Ref ContactsTable
+        POWERTOOLS_LOG_LEVEL: INFO
+        POWERTOOLS_LOGGER_CASE: PascalCase
+        POWERTOOLS_SERVICE_NAME: contact-manager
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+
+Resources:
+  ContactsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${Environment}-contacts"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: TTL
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: contact-manager
+
+  ContactApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-contact-api"
+      CodeUri: src/ContactManager.Api/
+      Handler: bootstrap
+      Environment:
+        Variables:
+          ContactsTableName: !Ref ContactsTable
+          ANNOTATIONS_HANDLER: CreateContact
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ContactsTable
+      Events:
+        CreateContact:
+          Type: HttpApi
+          Properties:
+            Path: /contacts
+            Method: post
+            ApiId: !Ref ContactApi
+      Tags:
+        Environment: !Ref Environment
+        Application: contact-manager
+
+  ContactApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - "Content-Type"
+          - "Authorization"
+        AllowMethods:
+          - POST
+          - OPTIONS
+        MaxAge: 600
+      Tags:
+        Environment: !Ref Environment
+        Application: contact-manager
+
+  ContactApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Environment}-contact-api"
+      RetentionInDays: 14
+
+Outputs:
+  ContactApiUrl:
+    Description: "API Gateway endpoint URL for Contact API"
+    Value: !Sub "https://${ContactApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${Environment}-contact-api-url"
+
+  ContactsTableName:
+    Description: "DynamoDB table name for contacts"
+    Value: !Ref ContactsTable
+    Export:
+      Name: !Sub "${Environment}-contacts-table-name"
+
+  ContactsTableArn:
+    Description: "DynamoDB table ARN for contacts"
+    Value: !GetAtt ContactsTable.Arn
+    Export:
+      Name: !Sub "${Environment}-contacts-table-arn"

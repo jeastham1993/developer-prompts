@@ -1,0 +1,45 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "examples", "examples", "{B36A84DF-456D-A817-6EDD-3EC3E7F6E11F}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "dotnet-aws-serverless", "dotnet-aws-serverless", "{A9067BEE-492A-29F8-5B91-3B4472ACB4BE}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{1A93119D-4B7F-B0FF-A948-671270CFD20B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ContactManager.Core.Tests", "examples\dotnet-aws-serverless\tests\ContactManager.Core.Tests\ContactManager.Core.Tests.csproj", "{A53F16E1-172E-EFE2-6C79-020454439C2D}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{3BACD6EE-C6F3-4405-B201-85A809E5B009}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ContactManager.Core", "examples\dotnet-aws-serverless\src\ContactManager.Core\ContactManager.Core.csproj", "{6775196C-44F5-DA4D-CD3B-497CA4553CBF}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A53F16E1-172E-EFE2-6C79-020454439C2D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A53F16E1-172E-EFE2-6C79-020454439C2D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A53F16E1-172E-EFE2-6C79-020454439C2D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A53F16E1-172E-EFE2-6C79-020454439C2D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6775196C-44F5-DA4D-CD3B-497CA4553CBF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6775196C-44F5-DA4D-CD3B-497CA4553CBF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6775196C-44F5-DA4D-CD3B-497CA4553CBF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6775196C-44F5-DA4D-CD3B-497CA4553CBF}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{A9067BEE-492A-29F8-5B91-3B4472ACB4BE} = {B36A84DF-456D-A817-6EDD-3EC3E7F6E11F}
+		{1A93119D-4B7F-B0FF-A948-671270CFD20B} = {A9067BEE-492A-29F8-5B91-3B4472ACB4BE}
+		{A53F16E1-172E-EFE2-6C79-020454439C2D} = {1A93119D-4B7F-B0FF-A948-671270CFD20B}
+		{3BACD6EE-C6F3-4405-B201-85A809E5B009} = {A9067BEE-492A-29F8-5B91-3B4472ACB4BE}
+		{6775196C-44F5-DA4D-CD3B-497CA4553CBF} = {3BACD6EE-C6F3-4405-B201-85A809E5B009}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {4ACAF752-DABB-42F3-96CA-798B7BC58A8A}
+	EndGlobalSection
+EndGlobal

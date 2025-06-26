@@ -2916,6 +2916,8 @@ public class PasswordService : IPasswordService
 
 ## Monitoring and Observability
 
+IT IS VITAL THAT YOU ensure that you don't write any information to log files, or as trace attributes, that would be considered personal identifiable information or sensitive information. That explicatally covers things like names, email address, credit card information, social security or national insurance numbers.
+
 ### Structured Logging
 
 ```csharp
